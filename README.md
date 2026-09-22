@@ -150,9 +150,11 @@ The target computer does not need Python, Ollama installed separately, a termina
 or internet access when the `models` folder was bundled successfully. Diagnostic
 output from the EXE and Ollama is written to `run.log`.
 
-The portable EXE displays one popup listing duplicate files that were skipped and a
-second popup listing every XLSX file below 90% confidence with its confidence
-percentage. These issues are also recorded in `run.log`.
+The portable EXE opens a live status window listing every input file as it is read.
+Successfully read files show a green check mark; low-confidence XLSX files show a
+red X and confidence percentage; duplicate files show a red X and `duplicate`.
+After scanning, the existing popups still list duplicate and low-confidence files.
+These issues are also recorded in `run.log`.
 
 ### 5. Portable Application Limitations
 

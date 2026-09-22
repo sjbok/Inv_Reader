@@ -6,16 +6,18 @@ import ctypes
 from datetime import date, datetime
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 
@@ -102,6 +104,16 @@ class ConfidenceAnalysis:
 
     filename: str
     confidence: float
+
+
+@dataclass
+class FileProcessingStatus:
+    """Current display status for one input file."""
+
+    filename: str
+    status: str
+    confidence: Optional[float] = None
+    message: str = ""
 
 
 @dataclass
@@ -869,9 +881,21 @@ def output_name(path: Path, input_dir: Path) -> str:
     return "__".join(parts) + ".txt"
 
 
+def _file_status_callback(callback: Optional[Callable[[FileProcessingStatus], None]],
+                          path: Path, input_dir: Path, status: str,
+                          confidence: Optional[float] = None,
+                          message: str = "") -> None:
+    if callback is not None:
+        callback(FileProcessingStatus(
+            str(path.relative_to(input_dir)), status, confidence, message
+        ))
+
+
 def process_documents(input_dir: Path, output_dir: Path, client: Optional[OllamaClient] = None,
                       chunk_size: int = DEFAULT_CHUNK_SIZE,
-                      report: Optional[ProcessingReport] = None) -> int:
+                      report: Optional[ProcessingReport] = None,
+                      on_file_status: Optional[Callable[[FileProcessingStatus], None]] = None
+                      ) -> int:
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
     if not input_dir.is_dir():
@@ -895,15 +919,23 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
         pending_log_entries = []
         for path in xlsx_documents:
             print("Reading {} -> {}".format(path, database_path))
+            _file_status_callback(on_file_status, path, input_dir, "reading")
             try:
                 order = extract_purchase_order(path)
-                confidence_results.append(
-                    ConfidenceAnalysis(path.name, confidence_level(order))
+                confidence = confidence_level(order)
+                confidence_results.append(ConfidenceAnalysis(path.name, confidence))
+                _file_status_callback(
+                    on_file_status,
+                    path,
+                    input_dir,
+                    "low_confidence" if confidence < 90.0 else "success",
+                    confidence,
                 )
                 extracted_orders.append((path, order))
             except Exception as error:
                 failures += 1
                 confidence_results.append(ConfidenceAnalysis(path.name, 0.0))
+                _file_status_callback(on_file_status, path, input_dir, "error", 0.0, str(error))
                 print("ERROR: {}: {}".format(path, error), file=sys.stderr)
 
         for path, order in sorted(
@@ -916,6 +948,7 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                     _sheet_name(order)
                 except Exception as error:
                     failures += 1
+                    _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))
                     print("ERROR: {}: {}".format(path, error), file=sys.stderr)
                 continue
 
@@ -925,6 +958,7 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
             if path.name in recorded_filenames[log_path]:
                 if report is not None:
                     report.duplicates.append(str(path.relative_to(input_dir)))
+                _file_status_callback(on_file_status, path, input_dir, "duplicate")
                 print("DUPLICATE: {} is already recorded in {}; skipping.".format(
                     path.name, log_path.name
                 ))
@@ -935,6 +969,7 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                 pending_log_entries.append((log_path, path.name))
             except Exception as error:
                 failures += 1
+                _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))
                 print("ERROR: {}: {}".format(path, error), file=sys.stderr)
         workbook_saved = False
         try:
@@ -958,11 +993,14 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
     for path in other_documents:
         destination = output_dir / output_name(path, input_dir)
         print("Summarizing {} -> {}".format(path, destination))
+        _file_status_callback(on_file_status, path, input_dir, "reading")
         try:
             summary = summarize_content(read_document(path), client, chunk_size)
             destination.write_text(summary.rstrip() + "\n", encoding="utf-8")
+            _file_status_callback(on_file_status, path, input_dir, "success")
         except Exception as error:
             failures += 1
+            _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))
             print("ERROR: {}: {}".format(path, error), file=sys.stderr)
 
     for result in confidence_results:
@@ -1008,6 +1046,165 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
+def is_windowed_application() -> bool:
+    """Use the live status window only for the packaged Windows application."""
+    return bool(getattr(sys, "frozen", False) and os.name == "nt")
+
+
+class ProcessingWindow:
+    """Small Tk window that renders file processing updates without blocking the scan."""
+
+    def __init__(self, input_dir: Path, documents: Sequence[Path]) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        self._status_queue = queue.Queue()
+        self._done = threading.Event()
+        self._failures = 0
+        self._error: Optional[Exception] = None
+        self._on_complete = None
+        self._rows = {}
+
+        self.root = tk.Tk()
+        self.root.title("Inv Reader")
+        self.root.geometry("760x520")
+        self.root.minsize(560, 320)
+        self.root.configure(bg="#f4f1eb")
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            pass
+        style.configure("Status.Treeview", rowheight=30, font=("Segoe UI", 10))
+        style.configure("Status.Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        style.configure("Status.TLabel", background="#f4f1eb", foreground="#263238")
+        style.configure("Status.Title.TLabel", background="#f4f1eb", foreground="#16251f",
+                        font=("Segoe UI", 18, "bold"))
+        style.configure("Status.Close.TButton", padding=(16, 7))
+
+        outer = ttk.Frame(self.root, padding=22)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Inv Reader", style="Status.Title.TLabel").pack(anchor="w")
+        self.summary = tk.StringVar(value="Reading input folder...")
+        ttk.Label(outer, textvariable=self.summary, style="Status.TLabel").pack(
+            anchor="w", pady=(4, 14)
+        )
+
+        table_frame = ttk.Frame(outer)
+        table_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=("indicator", "filename", "details"),
+            show="headings",
+            style="Status.Treeview",
+        )
+        self.tree.heading("indicator", text="")
+        self.tree.heading("filename", text="File")
+        self.tree.heading("details", text="Result")
+        self.tree.column("indicator", width=48, minwidth=48, stretch=False, anchor="center")
+        self.tree.column("filename", width=500, minwidth=220, anchor="w")
+        self.tree.column("details", width=150, minwidth=120, stretch=False, anchor="w")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.tree.tag_configure("waiting", foreground="#7b817d")
+        self.tree.tag_configure("reading", foreground="#7b817d")
+        self.tree.tag_configure("success", foreground="#207a45")
+        self.tree.tag_configure("low_confidence", foreground="#bd302b")
+        self.tree.tag_configure("duplicate", foreground="#bd302b")
+        self.tree.tag_configure("error", foreground="#bd302b")
+
+        for index, path in enumerate(documents):
+            filename = str(path.relative_to(input_dir))
+            row_id = "row-{}".format(index)
+            self._rows[filename] = row_id
+            self.tree.insert(
+                "", "end", iid=row_id, values=("...", filename, "Waiting"), tags=("waiting",)
+            )
+        self._total = len(self._rows)
+
+        self.close_button = ttk.Button(
+            outer, text="Close", command=self._close, style="Status.Close.TButton", state="disabled"
+        )
+        self.close_button.pack(anchor="e", pady=(14, 0))
+
+    def _close(self) -> None:
+        if self._done.is_set():
+            self.root.destroy()
+
+    def _post_status(self, status: FileProcessingStatus) -> None:
+        self._status_queue.put(status)
+
+    def _render_status(self, status: FileProcessingStatus) -> None:
+        row_id = self._rows.get(status.filename)
+        if row_id is None:
+            return
+        if status.status == "success":
+            indicator, details = "✓", ""
+        elif status.status == "low_confidence":
+            indicator = "✕"
+            details = "{:.2f}%".format(status.confidence or 0.0)
+        elif status.status == "duplicate":
+            indicator, details = "✕", "duplicate"
+        elif status.status == "error":
+            indicator, details = "✕", "error"
+        elif status.status == "reading":
+            indicator, details = "...", "Reading"
+        else:
+            indicator, details = "...", "Waiting"
+        self.tree.item(row_id, values=(indicator, status.filename, details), tags=(status.status,))
+        completed = sum(
+            1 for row in self.tree.get_children("")
+            if self.tree.item(row, "tags") and self.tree.item(row, "tags")[0]
+            in ("success", "low_confidence", "duplicate", "error")
+        )
+        self.summary.set("Processed {} of {} files".format(completed, self._total))
+
+    def _poll(self) -> None:
+        while True:
+            try:
+                status = self._status_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._render_status(status)
+
+        if self._done.is_set():
+            if self._error is not None:
+                self.summary.set("Scan stopped: {}".format(self._error))
+            elif self._failures:
+                self.summary.set("Scan complete with {} error(s)".format(self._failures))
+            else:
+                self.summary.set("Scan complete. Review the file results above.")
+            self.close_button.configure(state="normal")
+            if self._on_complete is not None:
+                callback = self._on_complete
+                self._on_complete = None
+                callback(self._error)
+            return
+        self.root.after(50, self._poll)
+
+    def run(self, processor: Callable[[Callable[[FileProcessingStatus], None]], int],
+            on_complete: Optional[Callable[[Optional[Exception]], None]] = None):
+        self._on_complete = on_complete
+
+        def worker() -> None:
+            try:
+                self._failures = processor(self._post_status)
+            except Exception as error:
+                self._error = error
+            finally:
+                self._done.set()
+
+        self.root.after(50, self._poll)
+        threading.Thread(target=worker, name="document-processing", daemon=True).start()
+        self.root.mainloop()
+        return self._failures, self._error
+
+
 def _run_application(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     root = application_root()
@@ -1038,22 +1235,36 @@ def _run_application(argv: Optional[Sequence[str]] = None) -> int:
         runtime = nullcontext()
     report = ProcessingReport([], [])
 
+    def process_batch(on_file_status: Optional[Callable[[FileProcessingStatus], None]] = None) -> int:
+        with runtime:
+            return process_documents(
+                input_dir,
+                output_dir,
+                OllamaClient(model, ollama_url, args.timeout),
+                args.chunk_size,
+                report,
+                on_file_status,
+            )
+
+    def show_completed_popups(processing_error: Optional[Exception]) -> None:
+        if processing_error is None:
+            show_issue_popups(report)
+
     try:
         if needs_ollama and getattr(sys, "frozen", False) and not executable:
             raise FileNotFoundError(
                 "Bundled ollama.exe was not found beside the application. "
                 "Copy the complete portable application directory."
             )
-        with runtime:
-            failures = process_documents(
-                input_dir,
-                output_dir,
-                OllamaClient(model, ollama_url, args.timeout),
-                args.chunk_size,
-                report,
-            )
-        show_issue_popups(report)
-    except (FileNotFoundError, OSError, RuntimeError) as error:
+        if is_windowed_application():
+            window = ProcessingWindow(input_dir, documents)
+            failures, error = window.run(process_batch, show_completed_popups)
+            if error is not None:
+                raise error
+        else:
+            failures = process_batch()
+            show_issue_popups(report)
+    except Exception as error:
         print("ERROR: {}".format(error), file=sys.stderr)
         return 1
     if failures:

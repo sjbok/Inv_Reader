@@ -16,6 +16,7 @@ from src.summarize_documents import (
     ConfidenceAnalysis,
     DocumentContent,
     DATABASE_HEADERS,
+    FileProcessingStatus,
     OllamaClient,
     OllamaRuntime,
     OUTPUT_WORKBOOK_NAME,
@@ -207,6 +208,45 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual([(result.filename, result.confidence) for result in report.low_confidence], [
                 ("needs-review.xlsx", 88.89),
             ])
+
+    def test_file_status_callback_reports_reading_and_low_confidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "needs-review.xlsx", memo="")
+
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                on_file_status=statuses.append,
+            ), 0)
+
+            self.assertEqual([(status.filename, status.status) for status in statuses], [
+                ("needs-review.xlsx", "reading"),
+                ("needs-review.xlsx", "low_confidence"),
+            ])
+            self.assertEqual(statuses[-1].confidence, 88.89)
+
+    def test_file_status_callback_marks_duplicate_after_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "order.xlsx")
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                on_file_status=statuses.append,
+            ), 0)
+
+            self.assertEqual(statuses[-1], FileProcessingStatus("order.xlsx", "duplicate"))
 
     def test_structured_xlsx_extraction_ignores_unused_columns(self):
         with tempfile.TemporaryDirectory() as directory:
