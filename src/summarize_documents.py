@@ -100,6 +100,11 @@ class PurchaseOrder:
     phone: str = ""
     address: str = ""
     company: str = ""
+    manager: str = ""
+    email: str = ""
+    business_registration_number: str = ""
+    business_address: str = ""
+    contact: str = ""
     memo: str = ""
     remarks: str = ""
     items: Optional[List[Item]] = None
@@ -478,9 +483,15 @@ def _row_field(rows: List[tuple], label: str) -> str:
     field_labels = {
         _normalise_label("발주일자"),
         _normalise_label("발주처"),
+        _normalise_label("담당자"),
+        _normalise_label("이메일"),
+        _normalise_label("발주사업자등록증번호"),
+        _normalise_label("사업자 주소"),
+        _normalise_label("연락처"),
         _normalise_label("수령인"),
         _normalise_label("수령인 연락처"),
         _normalise_label("배송지 주소"),
+        _normalise_label("납품처"),
         _normalise_label("특기사항/배송 메모"),
         _normalise_label("비고"),
     }
@@ -620,6 +631,17 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
         _normalise_label("비고"),
         _normalise_label("발주자 정보"),
         _normalise_label("납품 • 배송정보"),
+        _normalise_label("발주일자"),
+        _normalise_label("발주처"),
+        _normalise_label("담당자"),
+        _normalise_label("이메일"),
+        _normalise_label("발주사업자등록증번호"),
+        _normalise_label("사업자 주소"),
+        _normalise_label("연락처"),
+        _normalise_label("수령인"),
+        _normalise_label("수령인 연락처"),
+        _normalise_label("배송지 주소"),
+        _normalise_label("납품처"),
     }
     if columns is not None:
         for row in rows[columns["header"] + 1:]:
@@ -644,6 +666,11 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
         phone=_row_field(rows, "수령인 연락처"),
         address=_row_field(rows, "배송지 주소"),
         company=_row_field(rows, "발주처"),
+        manager=_row_field(rows, "담당자"),
+        email=_row_field(rows, "이메일"),
+        business_registration_number=_row_field(rows, "발주사업자등록증번호"),
+        business_address=_row_field(rows, "사업자 주소"),
+        contact=_row_field(rows, "연락처"),
         memo=_memo_field(rows),
         remarks="\n".join(_memo_messages(rows)),
         items=items,
@@ -663,7 +690,9 @@ def extract_purchase_order(path: Path) -> PurchaseOrder:
             rows = list(worksheet.iter_rows())
             order = _extract_order_from_rows(rows)
             if any((order.order_date, order.recipient, order.phone, order.address,
-                    order.company, order.memo, order.remarks, order.items)):
+                    order.company, order.manager, order.email,
+                    order.business_registration_number, order.business_address,
+                    order.contact, order.memo, order.remarks, order.items)):
                 return order
     finally:
         workbook.close()
@@ -681,7 +710,7 @@ def confidence_level(order: PurchaseOrder) -> float:
         bool(order.items),
     ]
     for item in order.items or []:
-        checks.append(all((item.code, item.name, item.quantity)))
+        checks.append(all((item.name, item.quantity)))
     if not checks:
         return 0.0
     return round(100.0 * sum(checks) / len(checks), 2)
@@ -703,8 +732,8 @@ def confidence_reasons(order: PurchaseOrder) -> List[str]:
     if not order.items:
         reasons.append("품목")
     for index, item in enumerate(order.items or [], 1):
-        if not all((item.code, item.name, item.quantity)):
-            reasons.append("품목 {}의 코드/명칭/수량".format(index))
+        if not all((item.name, item.quantity)):
+            reasons.append("품목 {}의 명칭/수량".format(index))
     return reasons
 
 
@@ -717,17 +746,22 @@ def missing_required_fields(order: PurchaseOrder) -> List[str]:
         phone_digits = order.phone.replace("-", "")
         recipient_is_phone = recipient_digits.isdigit() and recipient_digits == phone_digits
     required_fields = (
+        ("발주일자", order.order_date),
+        ("발주처", order.company),
+        ("담당자", order.manager),
+        ("이메일", order.email),
+        ("발주사업자등록증번호", order.business_registration_number),
+        ("사업자 주소", order.business_address),
+        ("연락처", order.contact),
         ("수령인", "" if recipient_is_phone else order.recipient),
         ("수령인 연락처", order.phone),
         ("배송지 주소", order.address),
-        ("발주처", order.company),
     )
     missing.extend(label for label, value in required_fields if not value)
     if not order.items:
         missing.append("품목")
     else:
         item_fields = (
-            ("품목코드", "code"),
             ("품목명", "name"),
             ("수량", "quantity"),
         )

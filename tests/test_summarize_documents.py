@@ -68,6 +68,9 @@ class SummarizerTests(unittest.TestCase):
     def _write_order(self, path, memo="배송 전 담당자에게 연락 바랍니다.",
                      order_date="2026-09-03", recipient="홍길동",
                      company="테스트 업체", phone="010-0000-0000",
+                     manager="테스트 담당자", email="test@example.com",
+                     business_registration_number="123-45-67890",
+                     business_address="서울시 사업자 주소", contact="02-1234-5678",
                      memo_label="특기사항 • 배송 메모",
                      bigo=None,
                      include_example=False, example_color="FF7F7F7F"):
@@ -77,6 +80,11 @@ class SummarizerTests(unittest.TestCase):
         rows = [
             ("발주일자", order_date),
             ("발주처", company),
+            ("담당자", manager),
+            ("이메일", email),
+            ("발주사업자등록증번호", business_registration_number),
+            ("사업자 주소", business_address),
+            ("연락처", contact),
             ("수령인", recipient, "", "수령인 연락처", phone),
             ("배송지 주소", "서울시 테스트구 테스트로 1"),
             ("품목코드", "품목명[규격]", "수량", "단위"),
@@ -342,11 +350,10 @@ class SummarizerTests(unittest.TestCase):
             output = StringIO()
             report = ProcessingReport([], [])
             with redirect_stdout(output):
-                self.assertEqual(process_documents(input_dir, output_dir, report=report), 0)
+                self.assertEqual(process_documents(input_dir, output_dir, report=report), 1)
             self.assertIn("needs-review.xlsx", output.getvalue())
-            self.assertIn("HUMAN REVIEW REQUIRED", output.getvalue())
-            self.assertEqual([(result.filename, result.confidence) for result in report.low_confidence], [
-                ("needs-review.xlsx", 87.5),
+            self.assertEqual(report.missing_data, [
+                MissingData("needs-review.xlsx", ["발주일자"]),
             ])
 
     def test_blank_memo_or_bigo_stays_blank_in_output(self):
@@ -415,6 +422,30 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(workbook["Orders"].max_row, 1)
             workbook.close()
 
+    def test_missing_business_input_fields_are_reported_and_delivery_target_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(
+                input_dir / "missing-business-fields.xlsx",
+                order_date="",
+                manager="",
+                email="",
+                business_registration_number="",
+                business_address="",
+                contact="",
+            )
+
+            report = ProcessingReport([], [])
+            self.assertEqual(process_documents(input_dir, output_dir, report=report), 1)
+            self.assertEqual(report.missing_data, [
+                MissingData("missing-business-fields.xlsx", [
+                    "발주일자", "담당자", "이메일", "발주사업자등록증번호", "사업자 주소", "연락처",
+                ]),
+            ])
+
     def test_empty_recipient_is_not_replaced_with_phone_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -440,6 +471,28 @@ class SummarizerTests(unittest.TestCase):
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
             self.assertEqual(workbook["Orders"].max_row, 1)
+            workbook.close()
+
+    def test_blank_item_code_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            source = input_dir / "blank-code.xlsx"
+            self._write_order(source)
+            workbook = load_workbook(source)
+            workbook.active.cell(11, 1).value = None
+            workbook.save(source)
+            workbook.close()
+
+            report = ProcessingReport([], [])
+            self.assertEqual(process_documents(input_dir, output_dir, report=report), 0)
+            self.assertEqual(report.missing_data, [])
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].cell(2, 6).value, "테스트 상품 [중형]-2개")
             workbook.close()
 
     def test_invalid_phone_is_skipped_and_reported(self):
@@ -509,14 +562,14 @@ class SummarizerTests(unittest.TestCase):
                 input_dir,
                 output_dir,
                 on_file_status=statuses.append,
-            ), 0)
+            ), 1)
 
             self.assertEqual([(status.filename, status.status) for status in statuses], [
                 ("needs-review.xlsx", "reading"),
-                ("needs-review.xlsx", "low_confidence"),
+                ("needs-review.xlsx", "failed"),
             ])
             self.assertEqual(statuses[-1].confidence, 87.5)
-            self.assertEqual(statuses[-1].message, "발주일자")
+            self.assertEqual(statuses[-1].message, "Missing required data: 발주일자")
 
     def test_file_status_callback_marks_duplicate_after_reading(self):
         with tempfile.TemporaryDirectory() as directory:

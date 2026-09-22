@@ -22,7 +22,7 @@ Start Ollama, then run:
 python3 -m src.summarize_documents
 ```
 
-XLSX files are appended to the shared workbook. `output/processed_files.txt` records input filenames already processed. A file is reported as `DUPLICATE` and skipped only when its filename is logged and all five identity fields (이름, 전화, 주소, 품목, 업체명) match an existing row. Files missing required import fields (수령인, 수령인 연락처, 배송지 주소, 발주처, or item data) are skipped, marked failed in the GUI, and listed with the empty columns in a popup. The program prints a confidence percentage for every XLSX file and marks results below 90% with `HUMAN REVIEW REQUIRED`. Non-XLSX documents produce one UTF-8 text file in `output/`; input directories are searched recursively and nested paths are flattened with `__` in the output filename.
+XLSX files are appended to the shared workbook. `output/processed_files.txt` records input filenames already processed. A file is reported as `DUPLICATE` and skipped only when its filename is logged and all five identity fields (이름, 전화, 주소, 품목, 업체명) match an existing row. Files missing required import fields (발주일자, 발주처, 담당자, 이메일, 발주사업자등록증번호, 사업자 주소, 연락처, 수령인, 수령인 연락처, 배송지 주소, or item name/quantity data) are skipped, marked failed in the GUI, and listed with the empty columns in a popup. 납품처 is ignored and may be blank. The program prints a confidence percentage for every XLSX file and marks results below 90% with `HUMAN REVIEW REQUIRED`. Non-XLSX documents produce one UTF-8 text file in `output/`; input directories are searched recursively and nested paths are flattened with `__` in the output filename.
 
 Useful options:
 
