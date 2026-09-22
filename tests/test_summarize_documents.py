@@ -69,6 +69,7 @@ class SummarizerTests(unittest.TestCase):
                      order_date="2026-09-03", recipient="홍길동",
                      company="테스트 업체", phone="010-0000-0000",
                      memo_label="특기사항 • 배송 메모",
+                     bigo=None,
                      include_example=False, example_color="FF7F7F7F"):
         workbook = Workbook()
         worksheet = workbook.active
@@ -83,6 +84,8 @@ class SummarizerTests(unittest.TestCase):
             ("A-2", "두 번째 상품", 3, "박스"),
             (memo_label, memo),
         ]
+        if bigo is not None:
+            rows.append(("비고", bigo))
         if include_example:
             rows.insert(5, ("EXAMPLE", "예시 상품", 99, "개"))
         for row in rows:
@@ -112,9 +115,9 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(list(workbook["Orders"].values), [
                 DATABASE_HEADERS,
                 ("홍길동님", "010-0000-0000", None, "서울시 테스트구 테스트로 1", 1,
-                 "(A-1) 테스트 상품 [중형]-2개", "a", "신용", "배송 전 담당자에게 연락 바랍니다.", "테스트 업체"),
+                 "(A-1) 테스트 상품 [중형]-2개", "a", "신용", "빠른배송바랍니다", "테스트 업체", "배송 전 담당자에게 연락 바랍니다."),
                 ("홍길동님", "010-0000-0000", None, "서울시 테스트구 테스트로 1", 1,
-                 "(A-2) 두 번째 상품-3개", "a", "신용", "배송 전 담당자에게 연락 바랍니다.", "테스트 업체"),
+                 "(A-2) 두 번째 상품-3개", "a", "신용", "빠른배송바랍니다", "테스트 업체", "배송 전 담당자에게 연락 바랍니다."),
             ])
             workbook.close()
             self.assertEqual(client.prompts, [])
@@ -140,8 +143,9 @@ class SummarizerTests(unittest.TestCase):
             rows = list(workbook["Orders"].values)
             self.assertEqual(len(rows), 5)
             self.assertEqual(rows[-1][0], "다른 고객님")
-            self.assertEqual(rows[-1][-2], "두 번째 주문")
-            self.assertEqual(rows[-1][-1], "테스트 업체")
+            self.assertEqual(rows[-1][-3], "빠른배송바랍니다")
+            self.assertEqual(rows[-1][-2], "테스트 업체")
+            self.assertEqual(rows[-1][-1], "두 번째 주문")
             workbook.close()
 
     def test_existing_database_is_migrated_to_new_columns(self):
@@ -173,10 +177,41 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(rows[0], DATABASE_HEADERS)
             self.assertEqual(rows[1], (
                 "기존 고객님", "010-1111-1111", None, "기존 주소", 1, "기존 품목", "a", "신용",
-                "기존 메모", "기존 업체",
+                "빠른배송바랍니다", "기존 업체", "기존 메모",
             ))
             self.assertEqual(rows[2][0], "둘째 고객님")
             self.assertEqual(workbook.sheetnames, ["Orders"])
+            workbook.close()
+
+    def test_existing_current_database_gets_bigo_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            database = output_dir / OUTPUT_WORKBOOK_NAME
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Orders"
+            worksheet.append((
+                "이름", "전화", "우편번호", "주소", "수량", "품목", "운임타입", "지불조건",
+                "특기사항", "업체명",
+            ))
+            worksheet.append((
+                "기존 고객님", "010-1111-1111", None, "기존 주소", 1, "기존 품목-1개", "a",
+                "신용", "기존 메모", "기존 업체",
+            ))
+            workbook.save(database)
+            workbook.close()
+
+            self._write_order(input_dir / "new-order.xlsx")
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(database, data_only=True)
+            self.assertEqual(workbook["Orders"].cell(1, 11).value, "비고")
+            self.assertEqual(workbook["Orders"].cell(2, 9).value, "빠른배송바랍니다")
+            self.assertEqual(workbook["Orders"].cell(2, 11).value, "기존 메모")
             workbook.close()
 
     def test_order_dates_are_normalized_from_common_formats(self):
@@ -201,6 +236,8 @@ class SummarizerTests(unittest.TestCase):
             format_phone_number("0812345678")
         with self.assertRaisesRegex(ValueError, "형식"):
             format_phone_number("0101234567")
+        with self.assertRaisesRegex(ValueError, "숫자와"):
+            format_phone_number("010-1234-5678x")
 
     def test_xlsx_text_normalizes_order_date_for_model_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -309,7 +346,28 @@ class SummarizerTests(unittest.TestCase):
             workbook = load_workbook(
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
-            self.assertIsNone(workbook["Orders"].cell(2, 9).value)
+            self.assertEqual(workbook["Orders"].cell(2, 9).value, "빠른배송바랍니다")
+            self.assertIsNone(workbook["Orders"].cell(2, 11).value)
+            workbook.close()
+
+    def test_bigo_column_contains_all_input_note_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(
+                input_dir / "multiple-notes.xlsx",
+                memo="배송 메모",
+                bigo="비고 메모",
+            )
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].cell(2, 11).value, "배송 메모\n비고 메모")
             workbook.close()
 
     def test_missing_required_xlsx_field_is_skipped_and_reported(self):
@@ -341,6 +399,33 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(workbook["Orders"].max_row, 1)
             workbook.close()
 
+    def test_empty_recipient_is_not_replaced_with_phone_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "missing-recipient.xlsx", recipient="")
+
+            report = ProcessingReport([], [])
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                report=report,
+                on_file_status=statuses.append,
+            ), 1)
+
+            self.assertEqual(report.missing_data, [
+                MissingData("missing-recipient.xlsx", ["수령인"]),
+            ])
+            self.assertEqual(statuses[-1].status, "failed")
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].max_row, 1)
+            workbook.close()
+
     def test_invalid_phone_is_skipped_and_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -360,6 +445,33 @@ class SummarizerTests(unittest.TestCase):
 
             self.assertEqual(report.invalid_data, [
                 InvalidData("invalid-phone.xlsx", "전화", "전화번호 국번은 010 또는 02~07이어야 합니다"),
+            ])
+            self.assertEqual(statuses[-1].status, "failed")
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].max_row, 1)
+            workbook.close()
+
+    def test_recipient_with_numbers_is_skipped_and_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "numeric-recipient.xlsx", recipient="홍길동2")
+
+            report = ProcessingReport([], [])
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                report=report,
+                on_file_status=statuses.append,
+            ), 1)
+
+            self.assertEqual(report.invalid_data, [
+                InvalidData("numeric-recipient.xlsx", "수령인", "수령인에는 숫자를 사용할 수 없습니다"),
             ])
             self.assertEqual(statuses[-1].status, "failed")
             workbook = load_workbook(

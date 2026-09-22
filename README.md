@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Put documents in `input/`. The program supports text files, Markdown, CSV, JSON, HTML, XML, DOCX, XLSX, PDF, and common image formats. XLSX order forms are read directly and appended to `output/2026 한진양식.xlsx` in one `Orders` worksheet. Recognized date formats are normalized before use, including `YYYY/M/D`, `YY/M/D` such as `26/9/3`, and common year-last forms. The worksheet uses the columns 이름, 전화, 우편번호, 주소, 수량, 품목, 운임타입, 지불조건, 특기사항, and 업체명. 이름 receives the `님` suffix; 전화 must use the 010 or 02~07 prefix and is formatted with hyphens; every 품목 quantity uses the unit `개` and is joined to the item description with `-`; 우편번호 is blank; 수량 is `1`; 운임타입 is `a`; 지불조건 is `신용`; and 특기사항 copies the input `특기사항 • 배송 메모` or `비고` value, remaining blank when the input is blank. Other supported document types continue to use the Ollama summarizer. PDFs with selectable text use layout-aware extraction; scanned PDFs are rendered as images for Qwen3-VL. Text requests use a bounded, non-thinking API path because the `qwen3-vl:8b` Ollama template can otherwise consume the entire response on internal reasoning.
+Put documents in `input/`. The program supports text files, Markdown, CSV, JSON, HTML, XML, DOCX, XLSX, PDF, and common image formats. XLSX order forms are read directly and appended to `output/2026 한진양식.xlsx` in one `Orders` worksheet. Recognized date formats are normalized before use, including `YYYY/M/D`, `YY/M/D` such as `26/9/3`, and common year-last forms. The worksheet uses the columns 이름, 전화, 우편번호, 주소, 수량, 품목, 운임타입, 지불조건, 특기사항, 업체명, and 비고. 이름 receives the `님` suffix; 전화 must use the 010 or 02~07 prefix and is formatted with hyphens; every 품목 quantity uses the unit `개` and is joined to the item description with `-`; 우편번호 is blank; 수량 is `1`; 운임타입 is `a`; 지불조건 is `신용`; 특기사항 is always `빠른배송바랍니다`; and 비고 combines all messages from both input `특기사항 • 배송 메모` and `비고` fields, remaining blank when both are empty. Other supported document types continue to use the Ollama summarizer. PDFs with selectable text use layout-aware extraction; scanned PDFs are rendered as images for Qwen3-VL. Text requests use a bounded, non-thinking API path because the `qwen3-vl:8b` Ollama template can otherwise consume the entire response on internal reasoning.
 
 Start Ollama, then run:
 
@@ -150,7 +150,9 @@ The target computer does not need Python, Ollama installed separately, a termina
 or internet access when the `models` folder was bundled successfully. Diagnostic
 output from the EXE and Ollama is written to `run.log`.
 
-The portable EXE opens a live status window listing every input file as it is read.
+The portable EXE opens a live status window listing every input file as it is read,
+including a confidence percentage column. Low-confidence percentages are clickable
+buttons that explain which fields lowered the score.
 Successfully read files show a green check mark; low-confidence XLSX files show a
 red X and confidence percentage; duplicate files show a red X and `duplicate`.
 After scanning, the existing popups still list duplicate and low-confidence files.

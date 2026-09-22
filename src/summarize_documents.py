@@ -32,8 +32,9 @@ OUTPUT_WORKBOOK_NAME = "2026 한진양식.xlsx"
 DATABASE_SHEET_NAME = "Orders"
 DATABASE_HEADERS = (
     "이름", "전화", "우편번호", "주소", "수량", "품목", "운임타입", "지불조건",
-    "특기사항", "업체명",
+    "특기사항", "업체명", "비고",
 )
+PREVIOUS_DATABASE_HEADERS = DATABASE_HEADERS[:-1]
 LEGACY_DATABASE_HEADERS = ("이름", "전화", "주소", "품목", "업체명", "특기사항/배송 메모")
 INPUT_LOG_NAME = "processed_files.txt"
 
@@ -100,6 +101,7 @@ class PurchaseOrder:
     address: str = ""
     company: str = ""
     memo: str = ""
+    remarks: str = ""
     items: Optional[List[Item]] = None
 
 
@@ -473,11 +475,22 @@ def _is_example_item_row(row: tuple) -> bool:
 def _row_field(rows: List[tuple], label: str) -> str:
     """Return the first nonempty cell to the right of a labeled cell."""
     wanted = _normalise_label(label)
+    field_labels = {
+        _normalise_label("발주일자"),
+        _normalise_label("발주처"),
+        _normalise_label("수령인"),
+        _normalise_label("수령인 연락처"),
+        _normalise_label("배송지 주소"),
+        _normalise_label("특기사항/배송 메모"),
+        _normalise_label("비고"),
+    }
     for row in rows:
         for column, value in enumerate(row):
             if _normalise_label(value) != wanted:
                 continue
             for candidate in row[column + 1:]:
+                if _normalise_label(candidate) in field_labels:
+                    break
                 text = _cell_text(candidate)
                 if text:
                     return text
@@ -485,20 +498,27 @@ def _row_field(rows: List[tuple], label: str) -> str:
 
 
 def _memo_field(rows: List[tuple]) -> str:
+    messages = _memo_messages(rows)
+    return messages[0] if messages else ""
+
+
+def _memo_messages(rows: List[tuple]) -> List[str]:
     wanted = {
         _normalise_label("특기사항/배송 메모"),
         _normalise_label("비고"),
     }
+    messages = []
     for row in rows:
         for column, value in enumerate(row):
             if _normalise_label(value) not in wanted:
                 continue
             for candidate in row[column + 1:]:
+                if _normalise_label(candidate) in wanted:
+                    break
                 text = _cell_text(candidate)
                 if text:
-                    return text
-            return ""
-    return ""
+                    messages.append(text)
+    return messages
 
 
 def _parse_order_date(value: Any) -> Optional[date]:
@@ -625,6 +645,7 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
         address=_row_field(rows, "배송지 주소"),
         company=_row_field(rows, "발주처"),
         memo=_memo_field(rows),
+        remarks="\n".join(_memo_messages(rows)),
         items=items,
     )
 
@@ -642,7 +663,7 @@ def extract_purchase_order(path: Path) -> PurchaseOrder:
             rows = list(worksheet.iter_rows())
             order = _extract_order_from_rows(rows)
             if any((order.order_date, order.recipient, order.phone, order.address,
-                    order.company, order.memo, order.items)):
+                    order.company, order.memo, order.remarks, order.items)):
                 return order
     finally:
         workbook.close()
@@ -690,8 +711,13 @@ def confidence_reasons(order: PurchaseOrder) -> List[str]:
 def missing_required_fields(order: PurchaseOrder) -> List[str]:
     """Return the input columns that must be populated before import."""
     missing = []
+    recipient_is_phone = False
+    if order.recipient and order.phone:
+        recipient_digits = order.recipient.replace("-", "")
+        phone_digits = order.phone.replace("-", "")
+        recipient_is_phone = recipient_digits.isdigit() and recipient_digits == phone_digits
     required_fields = (
-        ("수령인", order.recipient),
+        ("수령인", "" if recipient_is_phone else order.recipient),
         ("수령인 연락처", order.phone),
         ("배송지 주소", order.address),
         ("발주처", order.company),
@@ -780,8 +806,9 @@ def _database_row(order: PurchaseOrder, item: Item) -> List[Any]:
         _item_text(item),
         "a",
         "신용",
-        order.memo,
+        "빠른배송바랍니다",
         order.company,
+        order.remarks,
     ]
 
 
@@ -853,8 +880,9 @@ def _prepare_database_sheet_schema(worksheet: Any) -> Any:
                 legacy_values[3],
                 "a",
                 "신용",
-                legacy_values[5],
+                "빠른배송바랍니다",
                 legacy_values[4],
+                legacy_values[5],
             ]
             for column, value in enumerate(new_values, 1):
                 worksheet.cell(row, column).value = value
@@ -863,6 +891,13 @@ def _prepare_database_sheet_schema(worksheet: Any) -> Any:
         if worksheet.max_column > len(DATABASE_HEADERS):
             worksheet.delete_cols(len(DATABASE_HEADERS) + 1,
                                   worksheet.max_column - len(DATABASE_HEADERS))
+    elif (first_row[-1] is None
+          and tuple(first_row[:len(PREVIOUS_DATABASE_HEADERS)]) == PREVIOUS_DATABASE_HEADERS):
+        for row in range(2, worksheet.max_row + 1):
+            previous_note = worksheet.cell(row, 9).value
+            worksheet.cell(row, len(DATABASE_HEADERS)).value = previous_note
+            worksheet.cell(row, 9).value = "빠른배송바랍니다"
+        worksheet.cell(1, len(DATABASE_HEADERS)).value = "비고"
     elif tuple(first_row) != DATABASE_HEADERS:
         raise ValueError("Existing sheet '{}' does not use the expected database columns".format(
             worksheet.title
@@ -877,10 +912,10 @@ def _prepare_database_sheet_schema(worksheet: Any) -> Any:
             except ValueError:
                 pass
 
-    widths = (18, 18, 12, 45, 10, 45, 12, 12, 24, 28)
+    widths = (18, 18, 12, 45, 10, 45, 12, 12, 24, 28, 30)
     for column, width in enumerate(widths, 1):
         worksheet.column_dimensions[chr(64 + column)].width = width
-    worksheet.auto_filter.ref = "A1:J{}".format(max(worksheet.max_row, 1))
+    worksheet.auto_filter.ref = "A1:K{}".format(max(worksheet.max_row, 1))
     return worksheet
 
 
@@ -917,7 +952,7 @@ def append_order_to_workbook(workbook: Any, order: PurchaseOrder) -> int:
         for column, value in enumerate(_database_row(order, item), 1):
             worksheet.cell(next_row, column).value = value
         rows_written += 1
-    worksheet.auto_filter.ref = "A1:J{}".format(max(worksheet.max_row, 1))
+    worksheet.auto_filter.ref = "A1:K{}".format(max(worksheet.max_row, 1))
     return rows_written
 
 
@@ -1151,6 +1186,18 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                         path, ", ".join(missing_fields)
                     ), file=sys.stderr)
                     continue
+                if any(character.isdigit() for character in order.recipient):
+                    failures += 1
+                    reason = "수령인에는 숫자를 사용할 수 없습니다"
+                    if report is not None:
+                        report.invalid_data.append(InvalidData(
+                            str(path.relative_to(input_dir)), "수령인", reason
+                        ))
+                    _file_status_callback(
+                        on_file_status, path, input_dir, "failed", confidence, reason
+                    )
+                    print("ERROR: {}: invalid 수령인: {}".format(path, reason), file=sys.stderr)
+                    continue
                 try:
                     order.phone = format_phone_number(order.phone)
                 except ValueError as error:
@@ -1304,6 +1351,7 @@ class ProcessingWindow:
         self._on_complete = None
         self._rows = {}
         self._row_status = {}
+        self._row_confidence = {}
 
         self.root = tk.Tk()
         self.root.title("Inv Reader")
@@ -1357,23 +1405,31 @@ class ProcessingWindow:
         ttk.Label(rows_frame, text="File", style="Status.Header.TLabel").grid(
             row=0, column=1, padx=(0, 12), pady=(4, 8), sticky="w"
         )
+        ttk.Label(rows_frame, text="Confidence", style="Status.Header.TLabel").grid(
+            row=0, column=2, padx=(0, 16), pady=(4, 8), sticky="e"
+        )
         ttk.Label(rows_frame, text="Result", style="Status.Header.TLabel").grid(
-            row=0, column=2, padx=(0, 8), pady=(4, 8), sticky="e"
+            row=0, column=3, padx=(0, 8), pady=(4, 8), sticky="e"
         )
 
         for index, path in enumerate(documents):
             filename = str(path.relative_to(input_dir))
             row_frame = ttk.Frame(rows_frame)
-            row_frame.grid(row=index + 1, column=0, columnspan=3, sticky="ew")
+            row_frame.grid(row=index + 1, column=0, columnspan=4, sticky="ew")
             row_frame.columnconfigure(1, weight=1)
             indicator = ttk.Label(row_frame, text="...", width=4, anchor="center")
             indicator.grid(row=0, column=0, padx=(8, 10), pady=5, sticky="w")
             filename_label = ttk.Label(row_frame, text=filename, style="Status.TLabel")
             filename_label.grid(row=0, column=1, padx=(0, 12), pady=5, sticky="w")
+            confidence_label = ttk.Label(row_frame, text="—", style="Status.TLabel")
+            confidence_label.grid(row=0, column=2, padx=(0, 16), pady=5, sticky="e")
             result_frame = ttk.Frame(row_frame)
-            result_frame.grid(row=0, column=2, padx=(0, 8), pady=5, sticky="e")
-            self._rows[filename] = (indicator, filename_label, result_frame)
+            result_frame.grid(row=0, column=3, padx=(0, 8), pady=5, sticky="e")
+            self._rows[filename] = (
+                indicator, filename_label, confidence_label, result_frame
+            )
             self._row_status[filename] = "waiting"
+            self._row_confidence[filename] = None
             ttk.Label(result_frame, text="Waiting", style="Status.TLabel").pack(
                 anchor="e"
             )
@@ -1395,7 +1451,9 @@ class ProcessingWindow:
         row_widgets = self._rows.get(status.filename)
         if row_widgets is None:
             return
-        indicator_label, filename_label, result_frame = row_widgets
+        indicator_label, filename_label, confidence_label, result_frame = row_widgets
+        if status.confidence is not None:
+            self._row_confidence[status.filename] = status.confidence
         if status.status == "success":
             indicator, details = "✓", ""
         elif status.status == "low_confidence":
@@ -1423,6 +1481,11 @@ class ProcessingWindow:
         color = colors.get(status.status, colors["waiting"])
         indicator_label.configure(text=indicator, foreground=color)
         filename_label.configure(foreground=color)
+        confidence = self._row_confidence[status.filename]
+        confidence_label.configure(
+            text="—" if confidence is None else "{:.2f}%".format(confidence),
+            foreground=color,
+        )
         for child in result_frame.winfo_children():
             child.destroy()
         if status.status == "low_confidence":
