@@ -73,6 +73,7 @@ class SummarizerTests(unittest.TestCase):
                      business_address="서울시 사업자 주소", contact="02-1234-5678",
                      memo_label="특기사항 • 배송 메모",
                      bigo=None,
+                     note_on_following_row=False,
                      include_example=False, example_color="FF7F7F7F"):
         workbook = Workbook()
         worksheet = workbook.active
@@ -90,8 +91,10 @@ class SummarizerTests(unittest.TestCase):
             ("품목코드", "품목명[규격]", "수량", "단위"),
             ("A-1", "테스트 상품 [중형]", 2, "개"),
             ("A-2", "두 번째 상품", 3, "박스"),
-            (memo_label, memo),
+            (memo_label,) if note_on_following_row else (memo_label, memo),
         ]
+        if note_on_following_row:
+            rows.append((memo,))
         if bigo is not None:
             rows.append(("비고", bigo))
         if include_example:
@@ -248,7 +251,13 @@ class SummarizerTests(unittest.TestCase):
     def test_phone_numbers_are_validated_and_formatted(self):
         self.assertEqual(format_phone_number("01012345678"), "010-1234-5678")
         self.assertEqual(format_phone_number("02-123-4567"), "02-123-4567")
+        self.assertEqual(format_phone_number("010-12345678"), "010-1234-5678")
+        self.assertEqual(format_phone_number("0101234-5678"), "010-1234-5678")
+        self.assertEqual(format_phone_number("021234567"), "02-123-4567")
         self.assertEqual(format_phone_number("0212345678"), "02-1234-5678")
+        self.assertEqual(format_phone_number("02-123-4567").count("-"), 2)
+        self.assertEqual(format_phone_number("0212345678").count("-"), 2)
+        self.assertEqual(format_phone_number("01012345678").count("-"), 2)
         self.assertEqual(format_phone_number("0312345678"), "031-234-5678")
         self.assertEqual(format_phone_number("0512345678"), "051-234-5678")
         self.assertEqual(format_phone_number("051234567890"), "0512-3456-7890")
@@ -262,6 +271,24 @@ class SummarizerTests(unittest.TestCase):
             format_phone_number("0101234567")
         with self.assertRaisesRegex(ValueError, "숫자와"):
             format_phone_number("010-1234-5678x")
+
+    def test_unformatted_phone_is_saved_with_two_dashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "unformatted-phone.xlsx", phone="01012345678")
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            phone = workbook["Orders"].cell(2, 2).value
+            self.assertEqual(phone, "010-1234-5678")
+            self.assertEqual(phone.count("-"), 2)
+            workbook.close()
 
     def test_xlsx_text_normalizes_order_date_for_model_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -391,6 +418,26 @@ class SummarizerTests(unittest.TestCase):
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
             self.assertEqual(workbook["Orders"].cell(2, 11).value, "배송 메모\n비고 메모")
+            workbook.close()
+
+    def test_following_row_note_is_saved_in_bigo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(
+                input_dir / "following-note.xlsx",
+                memo="다음 행 배송 메모",
+                note_on_following_row=True,
+            )
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].cell(2, 11).value, "다음 행 배송 메모")
             workbook.close()
 
     def test_missing_required_xlsx_field_is_skipped_and_reported(self):

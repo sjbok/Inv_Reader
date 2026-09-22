@@ -518,17 +518,47 @@ def _memo_messages(rows: List[tuple]) -> List[str]:
         _normalise_label("특기사항/배송 메모"),
         _normalise_label("비고"),
     }
+    section_labels = wanted | {
+        _normalise_label("발주자 정보"),
+        _normalise_label("납품 • 배송정보"),
+        _normalise_label("발주일자"),
+        _normalise_label("발주처"),
+        _normalise_label("담당자"),
+        _normalise_label("이메일"),
+        _normalise_label("발주사업자등록증번호"),
+        _normalise_label("사업자 주소"),
+        _normalise_label("연락처"),
+        _normalise_label("수령인"),
+        _normalise_label("수령인 연락처"),
+        _normalise_label("배송지 주소"),
+        _normalise_label("납품처"),
+    }
     messages = []
-    for row in rows:
+    for row_number, row in enumerate(rows):
         for column, value in enumerate(row):
             if _normalise_label(value) not in wanted:
                 continue
+            found_message = False
             for candidate in row[column + 1:]:
                 if _normalise_label(candidate) in wanted:
                     break
                 text = _cell_text(candidate)
                 if text:
                     messages.append(text)
+                    found_message = True
+            if not found_message:
+                for following_row in rows[row_number + 1:]:
+                    following_messages = []
+                    for candidate in following_row:
+                        normalized = _normalise_label(candidate)
+                        if normalized in section_labels:
+                            break
+                        text = _cell_text(candidate)
+                        if text:
+                            following_messages.append(text)
+                    if following_messages:
+                        messages.extend(following_messages)
+                        break
     return messages
 
 
@@ -643,8 +673,18 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
         _normalise_label("배송지 주소"),
         _normalise_label("납품처"),
     }
+    note_section_labels = {
+        _normalise_label("특기사항/배송 메모"),
+        _normalise_label("비고"),
+    }
     if columns is not None:
+        in_note_section = False
         for row in rows[columns["header"] + 1:]:
+            if any(_normalise_label(value) in note_section_labels for value in row):
+                in_note_section = True
+                continue
+            if in_note_section:
+                continue
             if any(_normalise_label(value) in section_labels for value in row):
                 continue
             if _is_example_item_row(row):
@@ -819,9 +859,6 @@ def format_phone_number(phone: str) -> str:
     groups = formats[prefix].get(len(digits))
     if groups is None:
         raise ValueError("전화번호 형식에 맞지 않는 자리수입니다")
-    if "-" in value:
-        return value
-
     parts = []
     position = 0
     for length in groups:
