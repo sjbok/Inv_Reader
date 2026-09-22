@@ -148,6 +148,22 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(rows[-1][-1], "두 번째 주문")
             workbook.close()
 
+    def test_recipient_with_existing_honorific_is_not_suffixed_twice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "honorific.xlsx", recipient="홍길동님")
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].cell(2, 1).value, "홍길동님")
+            workbook.close()
+
     def test_existing_database_is_migrated_to_new_columns(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
