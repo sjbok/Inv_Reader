@@ -729,7 +729,7 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
         business_address=_row_field(rows, "사업자 주소"),
         contact=_row_field(rows, "연락처"),
         memo=_memo_field(rows),
-        remarks="\n".join(_memo_messages(rows)),
+        remarks=", ".join(_memo_messages(rows)),
         items=items,
     )
 

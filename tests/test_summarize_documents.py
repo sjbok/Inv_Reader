@@ -422,7 +422,7 @@ class SummarizerTests(unittest.TestCase):
             workbook = load_workbook(
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
-            self.assertEqual(workbook["Orders"].cell(2, 11).value, "배송 메모\n비고 메모")
+            self.assertEqual(workbook["Orders"].cell(2, 11).value, "배송 메모, 비고 메모")
             workbook.close()
 
     def test_following_row_note_is_saved_in_bigo(self):
