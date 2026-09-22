@@ -17,6 +17,8 @@ from src.summarize_documents import (
     DocumentContent,
     DATABASE_HEADERS,
     FileProcessingStatus,
+    InvalidData,
+    MissingData,
     OllamaClient,
     OllamaRuntime,
     OUTPUT_WORKBOOK_NAME,
@@ -27,6 +29,7 @@ from src.summarize_documents import (
     configured_model,
     confidence_level,
     extract_purchase_order,
+    format_phone_number,
     iter_documents,
     main,
     output_name,
@@ -63,20 +66,22 @@ class FakeResponse:
 
 class SummarizerTests(unittest.TestCase):
     def _write_order(self, path, memo="배송 전 담당자에게 연락 바랍니다.",
-                     order_date="2026-09-03",
+                     order_date="2026-09-03", recipient="홍길동",
+                     company="테스트 업체", phone="010-0000-0000",
+                     memo_label="특기사항 • 배송 메모",
                      include_example=False, example_color="FF7F7F7F"):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "발주서"
         rows = [
             ("발주일자", order_date),
-            ("발주처", "테스트 업체"),
-            ("수령인", "홍길동", "", "수령인 연락처", "010-0000-0000"),
+            ("발주처", company),
+            ("수령인", recipient, "", "수령인 연락처", phone),
             ("배송지 주소", "서울시 테스트구 테스트로 1"),
             ("품목코드", "품목명[규격]", "수량", "단위"),
             ("A-1", "테스트 상품 [중형]", 2, "개"),
             ("A-2", "두 번째 상품", 3, "박스"),
-            ("특기사항 • 배송 메모", memo),
+            (memo_label, memo),
         ]
         if include_example:
             rows.insert(5, ("EXAMPLE", "예시 상품", 99, "개"))
@@ -89,7 +94,7 @@ class SummarizerTests(unittest.TestCase):
         workbook.save(path)
         workbook.close()
 
-    def test_xlsx_orders_are_appended_to_daily_database_sheets(self):
+    def test_xlsx_orders_are_appended_to_one_database_sheet(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "input"
@@ -103,13 +108,13 @@ class SummarizerTests(unittest.TestCase):
 
             database = output_dir / OUTPUT_WORKBOOK_NAME
             workbook = load_workbook(database, data_only=True)
-            self.assertEqual(workbook.sheetnames, ["09.03"])
-            self.assertEqual(list(workbook["09.03"].values), [
+            self.assertEqual(workbook.sheetnames, ["Orders"])
+            self.assertEqual(list(workbook["Orders"].values), [
                 DATABASE_HEADERS,
-                ("홍길동", "010-0000-0000", "서울시 테스트구 테스트로 1",
-                 "(A-1) 테스트 상품 [중형] 2개", "테스트 업체", "배송 전 담당자에게 연락 바랍니다."),
-                ("홍길동", "010-0000-0000", "서울시 테스트구 테스트로 1",
-                 "(A-2) 두 번째 상품 3박스", "테스트 업체", "배송 전 담당자에게 연락 바랍니다."),
+                ("홍길동님", "010-0000-0000", None, "서울시 테스트구 테스트로 1", 1,
+                 "(A-1) 테스트 상품 [중형]-2개", "a", "신용", "배송 전 담당자에게 연락 바랍니다.", "테스트 업체"),
+                ("홍길동님", "010-0000-0000", None, "서울시 테스트구 테스트로 1", 1,
+                 "(A-2) 두 번째 상품-3개", "a", "신용", "배송 전 담당자에게 연락 바랍니다.", "테스트 업체"),
             ])
             workbook.close()
             self.assertEqual(client.prompts, [])
@@ -128,13 +133,50 @@ class SummarizerTests(unittest.TestCase):
             second_input = root / "second-input"
             second_input.mkdir()
             second = second_input / "second.xlsx"
-            self._write_order(second, memo="두 번째 주문")
+            self._write_order(second, memo="두 번째 주문", recipient="다른 고객")
             self.assertEqual(process_documents(second_input, output_dir), 0)
 
             workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
-            rows = list(workbook["09.03"].values)
+            rows = list(workbook["Orders"].values)
             self.assertEqual(len(rows), 5)
-            self.assertEqual(rows[-1][-1], "두 번째 주문")
+            self.assertEqual(rows[-1][0], "다른 고객님")
+            self.assertEqual(rows[-1][-2], "두 번째 주문")
+            self.assertEqual(rows[-1][-1], "테스트 업체")
+            workbook.close()
+
+    def test_existing_database_is_migrated_to_new_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            database = output_dir / OUTPUT_WORKBOOK_NAME
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "09.03"
+            worksheet.append(("이름", "전화", "주소", "품목", "업체명", "특기사항/배송 메모"))
+            worksheet.append(("기존 고객", "010-1111-1111", "기존 주소", "기존 품목",
+                              "기존 업체", "기존 메모"))
+            second_worksheet = workbook.create_sheet("09.04")
+            second_worksheet.append(("이름", "전화", "주소", "품목", "업체명", "특기사항/배송 메모"))
+            second_worksheet.append(("둘째 고객", "010-2222-2222", "두 번째 주소", "두 번째 품목",
+                                     "두 번째 업체", "두 번째 메모"))
+            workbook.save(database)
+            workbook.close()
+
+            self._write_order(input_dir / "new-order.xlsx")
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(database, data_only=True)
+            rows = list(workbook["Orders"].values)
+            self.assertEqual(rows[0], DATABASE_HEADERS)
+            self.assertEqual(rows[1], (
+                "기존 고객님", "010-1111-1111", None, "기존 주소", 1, "기존 품목", "a", "신용",
+                "기존 메모", "기존 업체",
+            ))
+            self.assertEqual(rows[2][0], "둘째 고객님")
+            self.assertEqual(workbook.sheetnames, ["Orders"])
             workbook.close()
 
     def test_order_dates_are_normalized_from_common_formats(self):
@@ -143,6 +185,22 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(_parse_order_date("2026/9/3"), date(2026, 9, 3))
         self.assertEqual(_parse_order_date("02/09/2026"), date(2026, 9, 2))
         self.assertEqual(_parse_order_date("12/31/26"), date(2026, 12, 31))
+
+    def test_phone_numbers_are_validated_and_formatted(self):
+        self.assertEqual(format_phone_number("01012345678"), "010-1234-5678")
+        self.assertEqual(format_phone_number("02-123-4567"), "02-123-4567")
+        self.assertEqual(format_phone_number("0212345678"), "02-1234-5678")
+        self.assertEqual(format_phone_number("0312345678"), "031-234-5678")
+        self.assertEqual(format_phone_number("0512345678"), "051-234-5678")
+        self.assertEqual(format_phone_number("051234567890"), "0512-3456-7890")
+        self.assertEqual(format_phone_number("0612345678"), "061-234-5678")
+        self.assertEqual(format_phone_number("07123456789"), "071-2345-6789")
+        with self.assertRaisesRegex(ValueError, "0으로 시작"):
+            format_phone_number("1012345678")
+        with self.assertRaisesRegex(ValueError, "010 또는 02~07"):
+            format_phone_number("0812345678")
+        with self.assertRaisesRegex(ValueError, "형식"):
+            format_phone_number("0101234567")
 
     def test_xlsx_text_normalizes_order_date_for_model_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,7 +211,7 @@ class SummarizerTests(unittest.TestCase):
 
             self.assertIn("발주일자\t2026-09-03", content.text)
 
-    def test_input_filenames_are_logged_by_order_date_and_duplicates_are_skipped(self):
+    def test_input_filenames_use_one_log_and_matching_orders_are_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "input"
@@ -163,7 +221,7 @@ class SummarizerTests(unittest.TestCase):
             self._write_order(source, order_date="26/9/3")
 
             self.assertEqual(process_documents(input_dir, output_dir), 0)
-            log = output_dir / "2026-09-03.txt"
+            log = output_dir / "processed_files.txt"
             self.assertEqual(log.read_text(encoding="utf-8"), "order.xlsx\n")
 
             output = StringIO()
@@ -176,7 +234,36 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(log.read_text(encoding="utf-8"), "order.xlsx\n")
 
             workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
-            self.assertEqual(workbook["09.03"].max_row, 3)
+            self.assertEqual(workbook["Orders"].max_row, 3)
+            workbook.close()
+
+    def test_same_filename_with_different_order_content_is_processed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_input = root / "first-input"
+            second_input = root / "second-input"
+            output_dir = root / "output"
+            first_input.mkdir()
+            second_input.mkdir()
+            self._write_order(first_input / "order.xlsx")
+            self._write_order(second_input / "order.xlsx", recipient="다른 고객")
+
+            self.assertEqual(process_documents(first_input, output_dir), 0)
+            report = ProcessingReport([], [])
+            self.assertEqual(process_documents(second_input, output_dir, report=report), 0)
+            self.assertEqual(report.duplicates, [])
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(workbook["Orders"].max_row, 5)
+            self.assertEqual(workbook["Orders"].cell(4, 1).value, "다른 고객님")
+            workbook.close()
+
+            third_input = root / "third-input"
+            third_input.mkdir()
+            self._write_order(third_input / "renamed.xlsx")
+            self.assertEqual(process_documents(third_input, output_dir), 0)
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(workbook["Orders"].max_row, 7)
             workbook.close()
 
     def test_low_confidence_xlsx_is_reported_for_human_review(self):
@@ -189,7 +276,7 @@ class SummarizerTests(unittest.TestCase):
             memo="메모",
             items=[Item(code="A-1", name="상품", quantity="1", unit="개")],
         )
-        self.assertEqual(confidence_level(order), 87.5)
+        self.assertEqual(confidence_level(order), 85.71)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -197,7 +284,7 @@ class SummarizerTests(unittest.TestCase):
             output_dir = root / "output"
             input_dir.mkdir()
             source = input_dir / "needs-review.xlsx"
-            self._write_order(source, memo="")
+            self._write_order(source, order_date="")
 
             output = StringIO()
             report = ProcessingReport([], [])
@@ -206,8 +293,80 @@ class SummarizerTests(unittest.TestCase):
             self.assertIn("needs-review.xlsx", output.getvalue())
             self.assertIn("HUMAN REVIEW REQUIRED", output.getvalue())
             self.assertEqual([(result.filename, result.confidence) for result in report.low_confidence], [
-                ("needs-review.xlsx", 88.89),
+                ("needs-review.xlsx", 87.5),
             ])
+
+    def test_blank_memo_or_bigo_stays_blank_in_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "blank-note.xlsx", memo="", memo_label="비고")
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertIsNone(workbook["Orders"].cell(2, 9).value)
+            workbook.close()
+
+    def test_missing_required_xlsx_field_is_skipped_and_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "missing-company.xlsx", company="")
+
+            report = ProcessingReport([], [])
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                report=report,
+                on_file_status=statuses.append,
+            ), 1)
+
+            self.assertEqual(report.missing_data, [
+                MissingData("missing-company.xlsx", ["발주처"]),
+            ])
+            self.assertEqual(statuses[-1].status, "failed")
+            self.assertEqual(report.low_confidence, [])
+            self.assertFalse((output_dir / "processed_files.txt").exists())
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].max_row, 1)
+            workbook.close()
+
+    def test_invalid_phone_is_skipped_and_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "invalid-phone.xlsx", phone="0812345678")
+
+            report = ProcessingReport([], [])
+            statuses = []
+            self.assertEqual(process_documents(
+                input_dir,
+                output_dir,
+                report=report,
+                on_file_status=statuses.append,
+            ), 1)
+
+            self.assertEqual(report.invalid_data, [
+                InvalidData("invalid-phone.xlsx", "전화", "전화번호 국번은 010 또는 02~07이어야 합니다"),
+            ])
+            self.assertEqual(statuses[-1].status, "failed")
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(workbook["Orders"].max_row, 1)
+            workbook.close()
 
     def test_file_status_callback_reports_reading_and_low_confidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -215,7 +374,7 @@ class SummarizerTests(unittest.TestCase):
             input_dir = root / "input"
             output_dir = root / "output"
             input_dir.mkdir()
-            self._write_order(input_dir / "needs-review.xlsx", memo="")
+            self._write_order(input_dir / "needs-review.xlsx", order_date="")
 
             statuses = []
             self.assertEqual(process_documents(
@@ -228,7 +387,8 @@ class SummarizerTests(unittest.TestCase):
                 ("needs-review.xlsx", "reading"),
                 ("needs-review.xlsx", "low_confidence"),
             ])
-            self.assertEqual(statuses[-1].confidence, 88.89)
+            self.assertEqual(statuses[-1].confidence, 87.5)
+            self.assertEqual(statuses[-1].message, "발주일자")
 
     def test_file_status_callback_marks_duplicate_after_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -440,6 +600,39 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(show_message.call_count, 2)
         self.assertIn("old-order.xlsx", show_message.call_args_list[0].args[1])
         self.assertIn("uncertain.xlsx: 75.00%", show_message.call_args_list[1].args[1])
+
+    def test_windows_build_shows_missing_input_columns(self):
+        report = ProcessingReport(
+            [], [], [MissingData("missing.xlsx", ["수령인 연락처", "발주처"])]
+        )
+        message_box = types.SimpleNamespace(MessageBoxW=lambda *args: None)
+        fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(user32=message_box))
+
+        with patch("src.summarize_documents.ctypes", fake_ctypes):
+            with patch("src.summarize_documents.os.name", "nt"):
+                with patch("src.summarize_documents.sys.frozen", True, create=True):
+                    with patch.object(message_box, "MessageBoxW") as show_message:
+                        show_issue_popups(report)
+
+        self.assertEqual(show_message.call_count, 1)
+        self.assertIn("missing.xlsx", show_message.call_args.args[1])
+        self.assertIn("수령인 연락처, 발주처", show_message.call_args.args[1])
+
+    def test_windows_build_shows_invalid_phone_error(self):
+        report = ProcessingReport(
+            [], [], [], [InvalidData("invalid.xlsx", "전화", "bad phone")]
+        )
+        message_box = types.SimpleNamespace(MessageBoxW=lambda *args: None)
+        fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(user32=message_box))
+
+        with patch("src.summarize_documents.ctypes", fake_ctypes):
+            with patch("src.summarize_documents.os.name", "nt"):
+                with patch("src.summarize_documents.sys.frozen", True, create=True):
+                    with patch.object(message_box, "MessageBoxW") as show_message:
+                        show_issue_popups(report)
+
+        self.assertEqual(show_message.call_count, 1)
+        self.assertIn("invalid.xlsx: 전화 - bad phone", show_message.call_args.args[1])
 
     def test_pdf_prefers_layout_aware_text_extraction(self):
         class FakePage:

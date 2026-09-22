@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
@@ -29,8 +29,13 @@ DEFAULT_CHUNK_SIZE = 24000
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 OLLAMA_STARTUP_TIMEOUT = 120
 OUTPUT_WORKBOOK_NAME = "2026 한진양식.xlsx"
-DATABASE_HEADERS = ("이름", "전화", "주소", "품목", "업체명", "특기사항/배송 메모")
-INPUT_LOG_DATE_FORMAT = "%Y-%m-%d"
+DATABASE_SHEET_NAME = "Orders"
+DATABASE_HEADERS = (
+    "이름", "전화", "우편번호", "주소", "수량", "품목", "운임타입", "지불조건",
+    "특기사항", "업체명",
+)
+LEGACY_DATABASE_HEADERS = ("이름", "전화", "주소", "품목", "업체명", "특기사항/배송 메모")
+INPUT_LOG_NAME = "processed_files.txt"
 
 TEXT_EXTENSIONS = {
     ".csv",
@@ -117,11 +122,30 @@ class FileProcessingStatus:
 
 
 @dataclass
+class MissingData:
+    """Required input columns that were empty for one source file."""
+
+    filename: str
+    fields: List[str]
+
+
+@dataclass
+class InvalidData:
+    """Input data that is present but fails a required format check."""
+
+    filename: str
+    field: str
+    reason: str
+
+
+@dataclass
 class ProcessingReport:
     """Issues found while processing one input batch."""
 
     duplicates: List[str]
     low_confidence: List[ConfidenceAnalysis]
+    missing_data: List[MissingData] = field(default_factory=list)
+    invalid_data: List[InvalidData] = field(default_factory=list)
 
 
 class OllamaClient:
@@ -461,20 +485,19 @@ def _row_field(rows: List[tuple], label: str) -> str:
 
 
 def _memo_field(rows: List[tuple]) -> str:
-    wanted = _normalise_label("특기사항/배송 메모")
-    for row_number, row in enumerate(rows):
+    wanted = {
+        _normalise_label("특기사항/배송 메모"),
+        _normalise_label("비고"),
+    }
+    for row in rows:
         for column, value in enumerate(row):
-            if _normalise_label(value) != wanted:
+            if _normalise_label(value) not in wanted:
                 continue
             for candidate in row[column + 1:]:
                 text = _cell_text(candidate)
                 if text:
                     return text
-            for following_row in rows[row_number + 1:]:
-                for candidate in following_row:
-                    text = _cell_text(candidate)
-                    if text:
-                        return text
+            return ""
     return ""
 
 
@@ -574,6 +597,7 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
     items = []
     section_labels = {
         _normalise_label("특기사항/배송 메모"),
+        _normalise_label("비고"),
         _normalise_label("발주자 정보"),
         _normalise_label("납품 • 배송정보"),
     }
@@ -590,6 +614,7 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
             }
             if not any(values.values()):
                 continue
+            values["unit"] = "개"
             # Footer and delivery-note rows do not have an item-column value.
             items.append(Item(**values))
 
@@ -632,36 +657,131 @@ def confidence_level(order: PurchaseOrder) -> float:
         bool(order.phone),
         bool(order.address),
         bool(order.company),
-        bool(order.memo),
         bool(order.items),
     ]
     for item in order.items or []:
-        checks.append(all((item.code, item.name, item.quantity, item.unit)))
+        checks.append(all((item.code, item.name, item.quantity)))
     if not checks:
         return 0.0
     return round(100.0 * sum(checks) / len(checks), 2)
 
 
+def confidence_reasons(order: PurchaseOrder) -> List[str]:
+    """Return short field-level reasons for a confidence score below 100%."""
+    reasons = []
+    if order.order_date is None:
+        reasons.append("발주일자")
+    if not order.recipient:
+        reasons.append("수령인")
+    if not order.phone:
+        reasons.append("수령인 연락처")
+    if not order.address:
+        reasons.append("배송지 주소")
+    if not order.company:
+        reasons.append("발주처")
+    if not order.items:
+        reasons.append("품목")
+    for index, item in enumerate(order.items or [], 1):
+        if not all((item.code, item.name, item.quantity)):
+            reasons.append("품목 {}의 코드/명칭/수량".format(index))
+    return reasons
+
+
+def missing_required_fields(order: PurchaseOrder) -> List[str]:
+    """Return the input columns that must be populated before import."""
+    missing = []
+    required_fields = (
+        ("수령인", order.recipient),
+        ("수령인 연락처", order.phone),
+        ("배송지 주소", order.address),
+        ("발주처", order.company),
+    )
+    missing.extend(label for label, value in required_fields if not value)
+    if not order.items:
+        missing.append("품목")
+    else:
+        item_fields = (
+            ("품목코드", "code"),
+            ("품목명", "name"),
+            ("수량", "quantity"),
+        )
+        for index, item in enumerate(order.items, 1):
+            for label, attribute in item_fields:
+                if not getattr(item, attribute):
+                    missing.append("{} (품목 {})".format(label, index))
+    return missing
+
+
 def _item_text(item: Item) -> str:
-    parts = []
+    description = []
     if item.code:
-        parts.append("({})".format(item.code))
+        description.append("({})".format(item.code))
     if item.name:
-        parts.append(item.name)
-    quantity = "{}{}".format(item.quantity, item.unit)
-    if quantity:
-        parts.append(quantity)
-    return " ".join(parts)
+        description.append(item.name)
+    quantity = "{}개".format(item.quantity) if item.quantity else ""
+    item_description = " ".join(description)
+    if item_description and quantity:
+        return "{}-{}".format(item_description, quantity)
+    return item_description or quantity
 
 
-def _database_row(order: PurchaseOrder, item: Item) -> List[str]:
+def _display_recipient(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if not value:
+        return None
+    return value if value.endswith("님") else value + "님"
+
+
+def format_phone_number(phone: str) -> str:
+    """Validate and normalize a Korean phone number for the output workbook."""
+    value = phone.strip()
+    digits = value.replace("-", "")
+    if not digits.isdigit():
+        raise ValueError("전화번호에는 숫자와 '-'만 사용할 수 있습니다")
+    if not digits.startswith("0"):
+        raise ValueError("전화번호는 0으로 시작해야 합니다")
+
+    formats = {
+        "010": {11: (3, 4, 4)},
+        "02": {9: (2, 3, 4), 10: (2, 4, 4)},
+        "03": {10: (3, 3, 4)},
+        "04": {10: (3, 3, 4)},
+        "05": {10: (3, 3, 4), 12: (4, 4, 4)},
+        "06": {10: (3, 3, 4)},
+        "07": {11: (3, 4, 4)},
+    }
+    prefix = next((candidate for candidate in formats if digits.startswith(candidate)), None)
+    if prefix is None:
+        raise ValueError("전화번호 국번은 010 또는 02~07이어야 합니다")
+    if not 9 <= len(digits) <= 12:
+        raise ValueError("하이픈을 제외한 전화번호 길이는 9~12자리여야 합니다")
+    groups = formats[prefix].get(len(digits))
+    if groups is None:
+        raise ValueError("전화번호 형식에 맞지 않는 자리수입니다")
+    if "-" in value:
+        return value
+
+    parts = []
+    position = 0
+    for length in groups:
+        parts.append(digits[position:position + length])
+        position += length
+    return "-".join(parts)
+
+
+def _database_row(order: PurchaseOrder, item: Item) -> List[Any]:
     return [
-        order.recipient,
+        _display_recipient(order.recipient),
         order.phone,
+        "",
         order.address,
+        1,
         _item_text(item),
-        order.company,
+        "a",
+        "신용",
         order.memo,
+        order.company,
     ]
 
 
@@ -681,8 +801,8 @@ def _new_database_workbook(output_path: Path):
     return workbook
 
 
-def _input_log_path(output_dir: Path, order_date: date) -> Path:
-    return output_dir / (order_date.strftime(INPUT_LOG_DATE_FORMAT) + ".txt")
+def _input_log_path(output_dir: Path) -> Path:
+    return output_dir / INPUT_LOG_NAME
 
 
 def _read_input_log(path: Path) -> set:
@@ -695,18 +815,22 @@ def _read_input_log(path: Path) -> set:
     }
 
 
+def _read_recorded_filenames(output_dir: Path) -> set:
+    """Read the shared log and legacy date logs used by older versions."""
+    filenames = _read_input_log(_input_log_path(output_dir))
+    for path in output_dir.glob("*.txt"):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.txt", path.name):
+            filenames.update(_read_input_log(path))
+    return filenames
+
+
 def _append_input_log(path: Path, filename: str) -> None:
     with path.open("a", encoding="utf-8") as log:
         log.write(filename + "\n")
 
 
-def _prepare_database_sheet(workbook: Any, name: str) -> Any:
+def _prepare_database_sheet_schema(worksheet: Any) -> Any:
     from openpyxl.styles import Alignment, Font, PatternFill
-
-    if name in workbook.sheetnames:
-        worksheet = workbook[name]
-    else:
-        worksheet = workbook.create_sheet(name)
 
     first_row = [worksheet.cell(1, column).value for column in range(1, len(DATABASE_HEADERS) + 1)]
     if not any(value is not None for value in first_row):
@@ -716,28 +840,107 @@ def _prepare_database_sheet(workbook: Any, name: str) -> Any:
             cell.fill = PatternFill("solid", fgColor="D9EAF7")
             cell.alignment = Alignment(horizontal="center", vertical="center")
         worksheet.freeze_panes = "A2"
+    elif tuple(first_row[:len(LEGACY_DATABASE_HEADERS)]) == LEGACY_DATABASE_HEADERS:
+        for row in range(2, worksheet.max_row + 1):
+            legacy_values = [worksheet.cell(row, column).value
+                             for column in range(1, len(LEGACY_DATABASE_HEADERS) + 1)]
+            new_values = [
+                legacy_values[0],
+                legacy_values[1],
+                "",
+                legacy_values[2],
+                1,
+                legacy_values[3],
+                "a",
+                "신용",
+                legacy_values[5],
+                legacy_values[4],
+            ]
+            for column, value in enumerate(new_values, 1):
+                worksheet.cell(row, column).value = value
+        for column, header in enumerate(DATABASE_HEADERS, 1):
+            worksheet.cell(1, column).value = header
+        if worksheet.max_column > len(DATABASE_HEADERS):
+            worksheet.delete_cols(len(DATABASE_HEADERS) + 1,
+                                  worksheet.max_column - len(DATABASE_HEADERS))
     elif tuple(first_row) != DATABASE_HEADERS:
-        raise ValueError("Existing sheet '{}' does not use the expected database columns".format(name))
+        raise ValueError("Existing sheet '{}' does not use the expected database columns".format(
+            worksheet.title
+        ))
 
-    widths = (18, 18, 45, 45, 28, 45)
+    for row in range(2, worksheet.max_row + 1):
+        worksheet.cell(row, 1).value = _display_recipient(worksheet.cell(row, 1).value)
+        phone_cell = worksheet.cell(row, 2)
+        if phone_cell.value:
+            try:
+                phone_cell.value = format_phone_number(str(phone_cell.value))
+            except ValueError:
+                pass
+
+    widths = (18, 18, 12, 45, 10, 45, 12, 12, 24, 28)
     for column, width in enumerate(widths, 1):
         worksheet.column_dimensions[chr(64 + column)].width = width
-    worksheet.auto_filter.ref = "A1:F{}".format(max(worksheet.max_row, 1))
+    worksheet.auto_filter.ref = "A1:J{}".format(max(worksheet.max_row, 1))
+    return worksheet
+
+
+def _prepare_database_sheet(workbook: Any) -> Any:
+    if DATABASE_SHEET_NAME in workbook.sheetnames:
+        worksheet = workbook[DATABASE_SHEET_NAME]
+    elif workbook.sheetnames:
+        worksheet = workbook.worksheets[0]
+        worksheet.title = DATABASE_SHEET_NAME
+    else:
+        worksheet = workbook.create_sheet(DATABASE_SHEET_NAME)
+
+    _prepare_database_sheet_schema(worksheet)
+    for other in list(workbook.worksheets):
+        if other is worksheet:
+            continue
+        _prepare_database_sheet_schema(other)
+        for values in other.iter_rows(
+            min_row=2, max_col=len(DATABASE_HEADERS), values_only=True
+        ):
+            if any(value is not None for value in values):
+                worksheet.append(values)
+        workbook.remove(other)
+    _prepare_database_sheet_schema(worksheet)
     return worksheet
 
 
 def append_order_to_workbook(workbook: Any, order: PurchaseOrder) -> int:
     """Append every item in an order and return the number of rows written."""
-    worksheet = _prepare_database_sheet(workbook, _sheet_name(order))
+    worksheet = _prepare_database_sheet(workbook)
     rows_written = 0
     for item in order.items or []:
         next_row = max(worksheet.max_row + 1, 2)
-        worksheet.cell(next_row, 1).value = order.recipient
         for column, value in enumerate(_database_row(order, item), 1):
             worksheet.cell(next_row, column).value = value
         rows_written += 1
-    worksheet.auto_filter.ref = "A1:F{}".format(max(worksheet.max_row, 1))
+    worksheet.auto_filter.ref = "A1:J{}".format(max(worksheet.max_row, 1))
     return rows_written
+
+
+def _database_identity(order: PurchaseOrder, item: Item) -> tuple:
+    return (
+        _display_recipient(order.recipient),
+        order.phone,
+        order.address,
+        _item_text(item),
+        order.company,
+    )
+
+
+def _database_identities(worksheet: Any) -> set:
+    return {
+        (row[0], row[1], row[3], row[5], row[9])
+        for row in worksheet.iter_rows(min_row=2, max_col=len(DATABASE_HEADERS), values_only=True)
+        if any(value is not None for value in row)
+    }
+
+
+def _order_identities(order: PurchaseOrder) -> set:
+    return {_database_identity(order, item) for item in order.items or []}
 
 
 def _read_pdf(path: Path) -> DocumentContent:
@@ -909,13 +1112,17 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
     xlsx_documents = [path for path in documents if path.suffix.lower() == ".xlsx"]
     other_documents = [path for path in documents if path.suffix.lower() != ".xlsx"]
     confidence_results = []
+    missing_filenames = set()
 
     if xlsx_documents:
         database_path = output_dir / OUTPUT_WORKBOOK_NAME
         database_existed = database_path.exists()
         workbook = _new_database_workbook(database_path)
+        worksheet = _prepare_database_sheet(workbook)
+        existing_identities = _database_identities(worksheet)
         extracted_orders = []
-        recorded_filenames = {}
+        recorded_filenames = _read_recorded_filenames(output_dir)
+        log_path = _input_log_path(output_dir)
         pending_log_entries = []
         for path in xlsx_documents:
             print("Reading {} -> {}".format(path, database_path))
@@ -924,12 +1131,46 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                 order = extract_purchase_order(path)
                 confidence = confidence_level(order)
                 confidence_results.append(ConfidenceAnalysis(path.name, confidence))
+                missing_fields = missing_required_fields(order)
+                if missing_fields:
+                    failures += 1
+                    missing_filenames.add(path.name)
+                    if report is not None:
+                        report.missing_data.append(MissingData(
+                            str(path.relative_to(input_dir)), missing_fields
+                        ))
+                    _file_status_callback(
+                        on_file_status,
+                        path,
+                        input_dir,
+                        "failed",
+                        confidence,
+                        "Missing required data: {}".format(", ".join(missing_fields)),
+                    )
+                    print("ERROR: {}: missing required data: {}".format(
+                        path, ", ".join(missing_fields)
+                    ), file=sys.stderr)
+                    continue
+                try:
+                    order.phone = format_phone_number(order.phone)
+                except ValueError as error:
+                    failures += 1
+                    if report is not None:
+                        report.invalid_data.append(InvalidData(
+                            str(path.relative_to(input_dir)), "전화", str(error)
+                        ))
+                    _file_status_callback(
+                        on_file_status, path, input_dir, "failed", confidence, str(error)
+                    )
+                    print("ERROR: {}: invalid 전화: {}".format(path, error), file=sys.stderr)
+                    continue
                 _file_status_callback(
                     on_file_status,
                     path,
                     input_dir,
                     "low_confidence" if confidence < 90.0 else "success",
                     confidence,
+                    ", ".join(confidence_reasons(order)) if confidence < 90.0 else "",
                 )
                 extracted_orders.append((path, order))
             except Exception as error:
@@ -943,19 +1184,12 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
             key=lambda result: (_sheet_name(result[1]) if result[1].order_date else "99.99",
                                 result[0].name),
         ):
-            if order.order_date is None:
-                try:
-                    _sheet_name(order)
-                except Exception as error:
-                    failures += 1
-                    _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))
-                    print("ERROR: {}: {}".format(path, error), file=sys.stderr)
-                continue
-
-            log_path = _input_log_path(output_dir, order.order_date)
-            if log_path not in recorded_filenames:
-                recorded_filenames[log_path] = _read_input_log(log_path)
-            if path.name in recorded_filenames[log_path]:
+            order_identities = _order_identities(order)
+            if (
+                path.name in recorded_filenames
+                and order_identities
+                and order_identities.issubset(existing_identities)
+            ):
                 if report is not None:
                     report.duplicates.append(str(path.relative_to(input_dir)))
                 _file_status_callback(on_file_status, path, input_dir, "duplicate")
@@ -965,8 +1199,9 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                 continue
             try:
                 append_order_to_workbook(workbook, order)
-                recorded_filenames[log_path].add(path.name)
-                pending_log_entries.append((log_path, path.name))
+                existing_identities.update(order_identities)
+                recorded_filenames.add(path.name)
+                pending_log_entries.append(path.name)
             except Exception as error:
                 failures += 1
                 _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))
@@ -979,7 +1214,7 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
         finally:
             workbook.close()
         if workbook_saved:
-            for log_path, filename in pending_log_entries:
+            for filename in pending_log_entries:
                 try:
                     _append_input_log(log_path, filename)
                 except Exception as error:
@@ -1006,13 +1241,14 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
     for result in confidence_results:
         print("Confidence: {} - {:.2f}%".format(result.filename, result.confidence))
     for result in confidence_results:
-        if result.confidence < 90.0:
+        if result.confidence < 90.0 and result.filename not in missing_filenames:
             print("HUMAN REVIEW REQUIRED: {} - {:.2f}%".format(
                 result.filename, result.confidence
             ))
     if report is not None:
         report.low_confidence.extend(
-            result for result in confidence_results if result.confidence < 90.0
+            result for result in confidence_results
+            if result.confidence < 90.0 and result.filename not in missing_filenames
         )
     return failures
 
@@ -1056,14 +1292,18 @@ class ProcessingWindow:
 
     def __init__(self, input_dir: Path, documents: Sequence[Path]) -> None:
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import messagebox, ttk
 
+        self._tk = tk
+        self._ttk = ttk
+        self._messagebox = messagebox
         self._status_queue = queue.Queue()
         self._done = threading.Event()
         self._failures = 0
         self._error: Optional[Exception] = None
         self._on_complete = None
         self._rows = {}
+        self._row_status = {}
 
         self.root = tk.Tk()
         self.root.title("Inv Reader")
@@ -1077,9 +1317,9 @@ class ProcessingWindow:
             style.theme_use("vista")
         except tk.TclError:
             pass
-        style.configure("Status.Treeview", rowheight=30, font=("Segoe UI", 10))
-        style.configure("Status.Treeview.Heading", font=("Segoe UI", 10, "bold"))
         style.configure("Status.TLabel", background="#f4f1eb", foreground="#263238")
+        style.configure("Status.Header.TLabel", background="#f4f1eb", foreground="#6d746e",
+                        font=("Segoe UI", 9, "bold"))
         style.configure("Status.Title.TLabel", background="#f4f1eb", foreground="#16251f",
                         font=("Segoe UI", 18, "bold"))
         style.configure("Status.Close.TButton", padding=(16, 7))
@@ -1094,36 +1334,48 @@ class ProcessingWindow:
 
         table_frame = ttk.Frame(outer)
         table_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=("indicator", "filename", "details"),
-            show="headings",
-            style="Status.Treeview",
+        canvas = tk.Canvas(table_frame, background="#f4f1eb", highlightthickness=0)
+        rows_frame = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.bind(
+            "<Configure>",
+            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
         )
-        self.tree.heading("indicator", text="")
-        self.tree.heading("filename", text="File")
-        self.tree.heading("details", text="Result")
-        self.tree.column("indicator", width=48, minwidth=48, stretch=False, anchor="center")
-        self.tree.column("filename", width=500, minwidth=220, anchor="w")
-        self.tree.column("details", width=150, minwidth=120, stretch=False, anchor="w")
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.pack(side="left", fill="both", expand=True)
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(canvas_window, width=event.width),
+        )
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        self.tree.tag_configure("waiting", foreground="#7b817d")
-        self.tree.tag_configure("reading", foreground="#7b817d")
-        self.tree.tag_configure("success", foreground="#207a45")
-        self.tree.tag_configure("low_confidence", foreground="#bd302b")
-        self.tree.tag_configure("duplicate", foreground="#bd302b")
-        self.tree.tag_configure("error", foreground="#bd302b")
+        rows_frame.columnconfigure(1, weight=1)
+        ttk.Label(rows_frame, text="", style="Status.Header.TLabel").grid(
+            row=0, column=0, padx=(8, 10), pady=(4, 8), sticky="w"
+        )
+        ttk.Label(rows_frame, text="File", style="Status.Header.TLabel").grid(
+            row=0, column=1, padx=(0, 12), pady=(4, 8), sticky="w"
+        )
+        ttk.Label(rows_frame, text="Result", style="Status.Header.TLabel").grid(
+            row=0, column=2, padx=(0, 8), pady=(4, 8), sticky="e"
+        )
 
         for index, path in enumerate(documents):
             filename = str(path.relative_to(input_dir))
-            row_id = "row-{}".format(index)
-            self._rows[filename] = row_id
-            self.tree.insert(
-                "", "end", iid=row_id, values=("...", filename, "Waiting"), tags=("waiting",)
+            row_frame = ttk.Frame(rows_frame)
+            row_frame.grid(row=index + 1, column=0, columnspan=3, sticky="ew")
+            row_frame.columnconfigure(1, weight=1)
+            indicator = ttk.Label(row_frame, text="...", width=4, anchor="center")
+            indicator.grid(row=0, column=0, padx=(8, 10), pady=5, sticky="w")
+            filename_label = ttk.Label(row_frame, text=filename, style="Status.TLabel")
+            filename_label.grid(row=0, column=1, padx=(0, 12), pady=5, sticky="w")
+            result_frame = ttk.Frame(row_frame)
+            result_frame.grid(row=0, column=2, padx=(0, 8), pady=5, sticky="e")
+            self._rows[filename] = (indicator, filename_label, result_frame)
+            self._row_status[filename] = "waiting"
+            ttk.Label(result_frame, text="Waiting", style="Status.TLabel").pack(
+                anchor="e"
             )
         self._total = len(self._rows)
 
@@ -1140,9 +1392,10 @@ class ProcessingWindow:
         self._status_queue.put(status)
 
     def _render_status(self, status: FileProcessingStatus) -> None:
-        row_id = self._rows.get(status.filename)
-        if row_id is None:
+        row_widgets = self._rows.get(status.filename)
+        if row_widgets is None:
             return
+        indicator_label, filename_label, result_frame = row_widgets
         if status.status == "success":
             indicator, details = "✓", ""
         elif status.status == "low_confidence":
@@ -1150,19 +1403,60 @@ class ProcessingWindow:
             details = "{:.2f}%".format(status.confidence or 0.0)
         elif status.status == "duplicate":
             indicator, details = "✕", "duplicate"
+        elif status.status == "failed":
+            indicator, details = "✕", "failed"
         elif status.status == "error":
             indicator, details = "✕", "error"
         elif status.status == "reading":
             indicator, details = "...", "Reading"
         else:
             indicator, details = "...", "Waiting"
-        self.tree.item(row_id, values=(indicator, status.filename, details), tags=(status.status,))
+        colors = {
+            "success": "#207a45",
+            "low_confidence": "#bd302b",
+            "duplicate": "#bd302b",
+            "failed": "#bd302b",
+            "error": "#bd302b",
+            "reading": "#7b817d",
+            "waiting": "#7b817d",
+        }
+        color = colors.get(status.status, colors["waiting"])
+        indicator_label.configure(text=indicator, foreground=color)
+        filename_label.configure(foreground=color)
+        for child in result_frame.winfo_children():
+            child.destroy()
+        if status.status == "low_confidence":
+            self._ttk.Button(
+                result_frame,
+                text=details,
+                command=lambda: self._show_confidence_details(status),
+            ).pack(anchor="e")
+        else:
+            label = self._tk.Label(
+                result_frame,
+                text=details,
+                background="#f4f1eb",
+                foreground=color,
+                font=("Segoe UI", 10),
+            )
+            label.pack(anchor="e")
+        self._row_status[status.filename] = status.status
         completed = sum(
-            1 for row in self.tree.get_children("")
-            if self.tree.item(row, "tags") and self.tree.item(row, "tags")[0]
-            in ("success", "low_confidence", "duplicate", "error")
+            current_status in ("success", "low_confidence", "duplicate", "failed", "error")
+            for current_status in self._row_status.values()
         )
         self.summary.set("Processed {} of {} files".format(completed, self._total))
+
+    def _show_confidence_details(self, status: FileProcessingStatus) -> None:
+        reasons = status.message or "The extracted fields were incomplete."
+        reason_lines = "\n".join("- {}".format(reason) for reason in reasons.split(", "))
+        self._messagebox.showinfo(
+            "Confidence details",
+            "File: {}\nConfidence: {:.2f}%\n\nLowered by:\n{}".format(
+                status.filename, status.confidence or 0.0, reason_lines
+            ),
+            parent=self.root,
+        )
 
     def _poll(self) -> None:
         while True:
@@ -1296,6 +1590,32 @@ def show_issue_popups(report: ProcessingReport) -> None:
                 "Human review is required for these files:\n\n{}".format(review_list),
                 "Human review required",
                 0x30,
+            )
+        if report.missing_data:
+            missing_list = "\n".join(
+                "- {}: {}".format(result.filename, ", ".join(result.fields))
+                for result in report.missing_data
+            )
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "These files were skipped because required data was empty:\n\n{}".format(
+                    missing_list
+                ),
+                "Missing required data",
+                0x10,
+            )
+        if report.invalid_data:
+            invalid_list = "\n".join(
+                "- {}: {} - {}".format(result.filename, result.field, result.reason)
+                for result in report.invalid_data
+            )
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "These files were skipped because input data was invalid:\n\n{}".format(
+                    invalid_list
+                ),
+                "Invalid input data",
+                0x10,
             )
     except (AttributeError, OSError) as error:
         print("ERROR: could not show issue popup: {}".format(error), file=sys.stderr)
