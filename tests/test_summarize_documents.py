@@ -73,6 +73,8 @@ class SummarizerTests(unittest.TestCase):
                      business_address="서울시 사업자 주소", contact="02-1234-5678",
                      memo_label="특기사항 • 배송 메모",
                      bigo=None,
+                     bigo_column=False,
+                     bigo_column_values=("", ""),
                      note_on_following_row=False,
                      include_example=False, example_color="FF7F7F7F"):
         workbook = Workbook()
@@ -88,9 +90,12 @@ class SummarizerTests(unittest.TestCase):
             ("연락처", contact),
             ("수령인", recipient, "", "수령인 연락처", phone),
             ("배송지 주소", "서울시 테스트구 테스트로 1"),
-            ("품목코드", "품목명[규격]", "수량", "단위"),
-            ("A-1", "테스트 상품 [중형]", 2, "개"),
-            ("A-2", "두 번째 상품", 3, "박스"),
+            ("품목코드", "품목명[규격]", "수량", "단위", "비고")
+            if bigo_column else ("품목코드", "품목명[규격]", "수량", "단위"),
+            ("A-1", "테스트 상품 [중형]", 2, "개", bigo_column_values[0])
+            if bigo_column else ("A-1", "테스트 상품 [중형]", 2, "개"),
+            ("A-2", "두 번째 상품", 3, "박스", bigo_column_values[1])
+            if bigo_column else ("A-2", "두 번째 상품", 3, "박스"),
             (memo_label,) if note_on_following_row else (memo_label, memo),
         ]
         if note_on_following_row:
@@ -438,6 +443,30 @@ class SummarizerTests(unittest.TestCase):
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
             self.assertEqual(workbook["Orders"].cell(2, 11).value, "다음 행 배송 메모")
+            workbook.close()
+
+    def test_bigo_table_column_only_reads_values_under_bigo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(
+                input_dir / "bigo-column.xlsx",
+                memo="",
+                bigo_column=True,
+                bigo_column_values=("첫 번째 비고", "두 번째 비고"),
+            )
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(
+                output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
+            )
+            self.assertEqual(
+                workbook["Orders"].cell(2, 11).value,
+                "첫 번째 비고\n두 번째 비고",
+            )
             workbook.close()
 
     def test_missing_required_xlsx_field_is_skipped_and_reported(self):

@@ -533,10 +533,27 @@ def _memo_messages(rows: List[tuple]) -> List[str]:
         _normalise_label("배송지 주소"),
         _normalise_label("납품처"),
     }
+    item_header_labels = {
+        _normalise_label("품목코드"),
+        _normalise_label("품목명[규격]"),
+        _normalise_label("수량"),
+        _normalise_label("단위"),
+    }
     messages = []
     for row_number, row in enumerate(rows):
+        normalized_row = {_normalise_label(value) for value in row}
         for column, value in enumerate(row):
-            if _normalise_label(value) not in wanted:
+            normalized_value = _normalise_label(value)
+            if normalized_value not in wanted:
+                continue
+            if normalized_value == _normalise_label("비고") and normalized_row & item_header_labels:
+                for following_row in rows[row_number + 1:]:
+                    if any(_normalise_label(cell) in section_labels for cell in following_row):
+                        break
+                    if column < len(following_row):
+                        text = _cell_text(following_row[column])
+                        if text:
+                            messages.append(text)
                 continue
             found_message = False
             for candidate in row[column + 1:]:
