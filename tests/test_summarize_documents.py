@@ -40,6 +40,7 @@ from src.summarize_documents import (
     show_issue_popups,
     summarize_content,
     _parse_order_date,
+    _pdf_line_value,
 )
 
 
@@ -715,6 +716,22 @@ class SummarizerTests(unittest.TestCase):
             "금연교육 흡연예방교구 금연의날",
         )
         self.assertEqual(order.items[0].quantity, "5")
+
+    def test_pdf_address_stops_before_inline_delivery_message(self):
+        lines = ["배송지 주소 주소값 배송메시지 문 앞에 놓아주세요"]
+
+        self.assertEqual(
+            _pdf_line_value(lines, "배송지 주소", multiline=True, stop_labels=("배송메시지",)),
+            "주소값",
+        )
+        self.assertEqual(
+            _pdf_line_value(
+                ["배송지 주소 주소값", "배송메시지 문 앞에 놓아주세요"],
+                "배송지 주소",
+                stop_labels=("배송메시지",),
+            ),
+            "주소값",
+        )
 
     def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):
         with tempfile.TemporaryDirectory() as directory:

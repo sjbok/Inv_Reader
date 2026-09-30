@@ -754,13 +754,21 @@ def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
 
     index, line = matches[occurrence]
     suffix = re.sub(r"^\s*{}\s*[:：]?\s*".format(re.escape(label)), "", line).strip()
+    stop_labels = tuple(stop_labels or ())
+    for stop_label in stop_labels:
+        inline_stop = re.search(r"{}\s*[:：]?".format(re.escape(stop_label)), suffix)
+        if inline_stop:
+            suffix = suffix[:inline_stop.start()].strip()
+            break
     values = [suffix] if suffix else []
     if suffix and not multiline:
         return suffix
-    stops = {_normalise_label(value) for value in (stop_labels or ())}
+    stops = {_normalise_label(value) for value in stop_labels}
     for following in lines[index + 1:]:
         normalized = _normalise_label(following)
-        if normalized in stops or normalized.startswith("http") or re.fullmatch(r"\d+/\d+", following):
+        if (any(normalized.startswith(stop) for stop in stops)
+                or normalized.startswith("http")
+                or re.fullmatch(r"\d+/\d+", following)):
             break
         if not following:
             if values:
@@ -975,7 +983,7 @@ def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseO
         date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
                                "\n".join(lines))
         order_date = _parse_order_date(date_match.group(1)) if date_match else None
-        address = _pdf_line_value(lines, "배송지 주소", multiline=True, stop_labels=("배송메시지",))
+        address = _pdf_line_value(lines, "배송지 주소", stop_labels=("배송메시지",))
         memo = _pdf_line_value(lines, "배송메시지", stop_labels=("수령자정보", "주문자정보"))
         return PurchaseOrder(
             order_date=order_date,
