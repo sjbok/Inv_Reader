@@ -176,7 +176,8 @@ Marketplace PDFs are imported directly into the shared workbook. 상품/옵션 a
 become 품목, 수령자명 becomes 이름, 휴대전화 becomes 전화, 배송지 주소 becomes 주소,
 and 배송메시지 becomes 비고. The icon beside 주문번호 is matched against the labeled
 icons in the root `Keys.pdf` file for 업체명. A multi-page PDF is treated as one
-independent order input per page, with page-specific duplicate tracking.
+independent order input per page, written to the workbook in source-page order with
+page-specific duplicate tracking.
 Indented blue 상품/옵션 lines are appended with ` | ` separators; an indented blue
 line containing a numeric amount ending in `원` is omitted as an extra-price line only.
 Recipient names may contain Korean/text characters and numbers; names containing only

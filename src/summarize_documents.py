@@ -1665,7 +1665,11 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                 _file_status_callback(on_file_status, path, input_dir, "error", 0.0, str(error))
                 print("ERROR: {}: {}".format(path, error), file=sys.stderr)
                 continue
-            for order, processed_name, source_name in document_orders:
+            source_order_date = next(
+                (order.order_date for order, _, _ in document_orders if order.order_date),
+                None,
+            )
+            for page_number, (order, processed_name, source_name) in enumerate(document_orders, 1):
                 try:
                     confidence, valid, missing = _validate_order_for_import(
                         path, input_dir, order, source_name, report, on_file_status
@@ -1682,12 +1686,14 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                     if missing:
                         missing_filenames.add(source_name)
                     continue
-                extracted_orders.append((path, processed_name, source_name, order))
+                extracted_orders.append((
+                    path, processed_name, source_name, order, source_order_date, page_number
+                ))
 
-        for path, processed_name, source_name, order in sorted(
+        for path, processed_name, source_name, order, source_order_date, page_number in sorted(
             extracted_orders,
-            key=lambda result: (_sheet_name(result[3]) if result[3].order_date else "99.99",
-                                result[0].name, result[1]),
+            key=lambda result: (result[4].strftime("%m.%d") if result[4] else "99.99",
+                                result[0].name, result[5]),
         ):
             order_identities = _order_identities(order)
             if (

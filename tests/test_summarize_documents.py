@@ -868,7 +868,7 @@ class SummarizerTests(unittest.TestCase):
                     items=[Item(name="첫 상품", quantity="2", unit="개")],
                 ),
                 PurchaseOrder(
-                    order_date=date(2026, 9, 16),
+                    order_date=date(2026, 9, 1),
                     recipient="둘 고객",
                     phone="010-2222-2222",
                     address="둘 주소",
