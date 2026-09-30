@@ -602,13 +602,13 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(workbook["Orders"].max_row, 1)
             workbook.close()
 
-    def test_recipient_with_numbers_is_skipped_and_reported(self):
+    def test_numeric_only_recipient_is_skipped_and_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "input"
             output_dir = root / "output"
             input_dir.mkdir()
-            self._write_order(input_dir / "numeric-recipient.xlsx", recipient="홍길동2")
+            self._write_order(input_dir / "numeric-recipient.xlsx", recipient="12345")
 
             report = ProcessingReport([], [])
             statuses = []
@@ -628,6 +628,67 @@ class SummarizerTests(unittest.TestCase):
             )
             self.assertEqual(workbook["Orders"].max_row, 1)
             workbook.close()
+
+    def test_recipient_with_text_and_numbers_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "mixed-recipient.xlsx", recipient="홍길동2")
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(workbook["Orders"].cell(2, 1).value, "홍길동2님")
+            workbook.close()
+
+    def test_pdf_recipient_with_text_and_numbers_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "mixed-recipient.pdf").write_bytes(b"patched PDF")
+            order = PurchaseOrder(
+                order_date=date(2026, 9, 15),
+                recipient="고객2",
+                phone="010-1234-5678",
+                address="배송지",
+                company="G 마켓",
+                items=[Item(name="상품", quantity="1", unit="개")],
+            )
+
+            with patch("src.summarize_documents.extract_pdf_orders", return_value=[order]):
+                self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(workbook["Orders"].cell(2, 1).value, "고객2님")
+            workbook.close()
+
+    def test_pdf_numeric_only_recipient_is_skipped_and_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "numeric-recipient.pdf").write_bytes(b"patched PDF")
+            order = PurchaseOrder(
+                order_date=date(2026, 9, 15),
+                recipient="12345",
+                phone="010-1234-5678",
+                address="배송지",
+                company="G 마켓",
+                items=[Item(name="상품", quantity="1", unit="개")],
+            )
+            report = ProcessingReport([], [])
+
+            with patch("src.summarize_documents.extract_pdf_orders", return_value=[order]):
+                self.assertEqual(process_documents(input_dir, output_dir, report=report), 1)
+
+            self.assertEqual(report.invalid_data, [
+                InvalidData("numeric-recipient.pdf#page-1", "수령인", "수령인에는 숫자를 사용할 수 없습니다"),
+            ])
 
     def test_file_status_callback_reports_reading_and_low_confidence(self):
         with tempfile.TemporaryDirectory() as directory:

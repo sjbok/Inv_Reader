@@ -179,3 +179,5 @@ icons in the root `Keys.pdf` file for 업체명. A multi-page PDF is treated as 
 independent order input per page, with page-specific duplicate tracking.
 Indented blue 상품/옵션 lines are appended with ` | ` separators; an indented blue
 line containing a numeric amount ending in `원` is omitted as an extra-price line only.
+Recipient names may contain Korean/text characters and numbers; names containing only
+numbers are rejected.

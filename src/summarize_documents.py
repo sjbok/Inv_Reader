@@ -1570,6 +1570,11 @@ def _document_orders(path: Path, input_dir: Path) -> List[tuple]:
     return [(extract_purchase_order(path), path.name, str(path.relative_to(input_dir)))]
 
 
+def _is_numeric_only_recipient(value: str) -> bool:
+    compact = re.sub(r"[\s,().+\-]", "", value)
+    return bool(compact) and compact.isdigit()
+
+
 def _validate_order_for_import(path: Path, input_dir: Path, order: PurchaseOrder,
                                source_name: str, report: Optional[ProcessingReport],
                                on_file_status: Optional[Callable[[FileProcessingStatus], None]]) -> tuple:
@@ -1593,7 +1598,7 @@ def _validate_order_for_import(path: Path, input_dir: Path, order: PurchaseOrder
             source_name, ", ".join(missing_fields)
         ), file=sys.stderr)
         return confidence, False, True
-    if any(character.isdigit() for character in order.recipient):
+    if _is_numeric_only_recipient(order.recipient):
         reason = "수령인에는 숫자를 사용할 수 없습니다"
         if report is not None:
             report.invalid_data.append(InvalidData(source_name, "수령인", reason))
