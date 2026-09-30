@@ -842,8 +842,12 @@ def _pdf_line_is_blue(page: Any, line_words: List[tuple]) -> bool:
 
 def _append_pdf_item_line(current: str, line: str, extra: bool) -> str:
     if extra:
-        return "\n".join(part for part in (current, line) if part)
+        return " | ".join(part for part in (current, line) if part)
     return _join_pdf_item_text(current, line)
+
+
+def _pdf_is_extra_price_line(name: str) -> bool:
+    return bool(re.search(r"\d[\d,]*\s*원", name))
 
 
 def _pdf_icon_signature(image_bytes: bytes) -> tuple:
@@ -991,7 +995,7 @@ def _pdf_items(page: Any) -> List[Item]:
             min(word[0] for word in name_words) > main_name_x + 4
             or _pdf_line_is_blue(page, line_words)
         )
-        if extra and "원" in name:
+        if extra and _pdf_is_extra_price_line(name):
             continue
         if quantity:
             if current is not None:

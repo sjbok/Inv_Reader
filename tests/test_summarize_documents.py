@@ -734,7 +734,7 @@ class SummarizerTests(unittest.TestCase):
             "주소값",
         )
 
-    def test_pdf_items_preserve_blue_indented_options_but_skip_price_line(self):
+    def test_pdf_items_preserve_all_blue_options_but_skip_one_price_line(self):
         words = [
             (98, 10, 130, 20, "상품/옵션", 0, 0, 0),
             (214, 10, 230, 20, "수량", 0, 0, 1),
@@ -743,11 +743,13 @@ class SummarizerTests(unittest.TestCase):
             (30, 42, 70, 52, "주상품", 1, 1, 0),
             (45, 54, 95, 64, "옵션: 빨강", 2, 0, 0),
             (45, 66, 160, 76, "[추가상품] : 총액 / 20000원", 2, 1, 0),
-            (111, 84, 125, 94, "계", 3, 0, 0),
+            (45, 78, 95, 88, "포장: 선물용", 2, 2, 0),
+            (111, 96, 125, 106, "계", 3, 0, 0),
         ]
         spans = [
             {"bbox": (45, 54, 95, 64), "color": 255},
             {"bbox": (45, 66, 160, 76), "color": 255},
+            {"bbox": (45, 78, 95, 88), "color": 255},
         ]
 
         class FakePage:
@@ -759,7 +761,7 @@ class SummarizerTests(unittest.TestCase):
         items = _pdf_items(FakePage())
 
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].name, "주상품\n옵션: 빨강")
+        self.assertEqual(items[0].name, "주상품 | 옵션: 빨강 | 포장: 선물용")
         self.assertEqual(items[0].quantity, "2")
 
     def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):
