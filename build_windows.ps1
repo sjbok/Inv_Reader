@@ -84,6 +84,7 @@ New-Item $ollamaDirectory -ItemType Directory -Force | Out-Null
 New-Item $bundleModels -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $ollamaInstall "*") $ollamaDirectory -Recurse -Force
 Copy-Item (Join-Path $modelsSource "*") $bundleModels -Recurse -Force
+Copy-Item (Join-Path $projectRoot "Keys.pdf") $bundle -Force
 @{ model = $Model } | ConvertTo-Json | Set-Content (Join-Path $bundle "portable_config.json") -Encoding UTF8
 New-Item (Join-Path $bundle "input") -ItemType Directory -Force | Out-Null
 New-Item (Join-Path $bundle "output") -ItemType Directory -Force | Out-Null

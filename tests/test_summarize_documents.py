@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -29,6 +30,7 @@ from src.summarize_documents import (
     configured_model,
     confidence_level,
     extract_purchase_order,
+    extract_pdf_order,
     format_phone_number,
     iter_documents,
     main,
@@ -465,7 +467,7 @@ class SummarizerTests(unittest.TestCase):
             )
             self.assertEqual(
                 workbook["Orders"].cell(2, 11).value,
-                "첫 번째 비고\n두 번째 비고",
+                "첫 번째 비고, 두 번째 비고",
             )
             workbook.close()
 
@@ -692,6 +694,52 @@ class SummarizerTests(unittest.TestCase):
             order = extract_purchase_order(path)
 
             self.assertEqual([item.code for item in order.items], ["A-1", "A-2"])
+
+    def test_marketplace_pdf_extracts_order_fields_and_matches_keys_icon(self):
+        order = extract_pdf_order(Path("input/Example.pdf"), Path("Keys.pdf"))
+
+        self.assertEqual(order.order_date, date(2026, 9, 15))
+        self.assertEqual(order.recipient, "김태연")
+        self.assertEqual(order.phone, "010-4238-4338")
+        self.assertEqual(
+            order.address,
+            "(31202) 충청남도 천안시 동남구 풍세로 801-28 "
+            "(천안청룡초등학교) 천안청룡초 3학년",
+        )
+        self.assertEqual(order.company, "G 마켓")
+        self.assertEqual(order.remarks, "")
+        self.assertEqual(len(order.items), 1)
+        self.assertEqual(
+            order.items[0].name,
+            "나만의 노담 손톱깍이 만들기(5인) / 7대안전교육 보건교육 제품 "
+            "금연교육 흡연예방교구 금연의날",
+        )
+        self.assertEqual(order.items[0].quantity, "5")
+
+    def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "order.xlsx")
+            shutil.copy2("input/Example.pdf", input_dir / "marketplace.pdf")
+
+            client = FakeClient()
+            self.assertEqual(process_documents(input_dir, output_dir, client), 0)
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            rows = list(workbook["Orders"].values)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(rows[3][0], "김태연님")
+            self.assertEqual(rows[3][1], "010-4238-4338")
+            self.assertEqual(rows[3][5],
+                             "나만의 노담 손톱깍이 만들기(5인) / 7대안전교육 보건교육 제품 "
+                             "금연교육 흡연예방교구 금연의날-5개")
+            self.assertEqual(rows[3][9], "G 마켓")
+            self.assertIsNone(rows[3][10])
+            workbook.close()
+            self.assertEqual(client.prompts, [])
 
     def test_summarizes_text_into_flat_output_file(self):
         with tempfile.TemporaryDirectory() as directory:

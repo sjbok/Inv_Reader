@@ -2,9 +2,11 @@
 
 import argparse
 import base64
+import colorsys
 import ctypes
 from datetime import date, datetime
 import json
+import math
 import os
 import queue
 import re
@@ -734,8 +736,264 @@ def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
     )
 
 
+def _pdf_lines(page: Any) -> List[str]:
+    return [line.strip() for line in page.get_text("text", sort=True).splitlines()]
+
+
+def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
+                    multiline: bool = False, stop_labels: Optional[Sequence[str]] = None) -> str:
+    """Read the value following a PDF label, including values wrapped to later lines."""
+    wanted = _normalise_label(label)
+    matches = []
+    for index, line in enumerate(lines):
+        normalized = _normalise_label(line)
+        if normalized.startswith(wanted):
+            matches.append((index, line))
+    if not matches:
+        return ""
+
+    index, line = matches[occurrence]
+    suffix = re.sub(r"^\s*{}\s*[:：]?\s*".format(re.escape(label)), "", line).strip()
+    values = [suffix] if suffix else []
+    if suffix and not multiline:
+        return suffix
+    stops = {_normalise_label(value) for value in (stop_labels or ())}
+    for following in lines[index + 1:]:
+        normalized = _normalise_label(following)
+        if normalized in stops or normalized.startswith("http") or re.fullmatch(r"\d+/\d+", following):
+            break
+        if not following:
+            if values:
+                break
+            continue
+        values.append(following)
+        if not multiline:
+            break
+    return " ".join(values).strip()
+
+
+def _pdf_recipient_phone(page: Any) -> str:
+    words = page.get_text("words", sort=True)
+    labels = [word for word in words if _normalise_label(word[4]) == _normalise_label("휴대전화")]
+    if not labels:
+        return ""
+    label = max(labels, key=lambda word: word[1])
+    same_line = [word for word in words
+                 if word[0] > label[2] - 2 and abs(word[1] - label[1]) < 2]
+    phone = next((word[4] for word in same_line
+                  if re.fullmatch(r"0[0-9-]+", word[4])), "")
+    if phone:
+        return phone
+    for line in reversed(_pdf_lines(page)):
+        marker = line.find("휴대전화")
+        if marker >= 0:
+            phone_match = re.search(r"0[0-9-]{8,12}", line[marker + len("휴대전화"):])
+            if phone_match:
+                return phone_match.group(0)
+    return ""
+
+
+def _join_pdf_item_text(left: str, right: str) -> str:
+    if not left:
+        return right
+    if not right:
+        return left
+    if re.search(r"[가-힣]$", left) and re.match(r"[가-힣]", right):
+        return left + right
+    return left + " " + right
+
+
+def _pdf_icon_signature(image_bytes: bytes) -> tuple:
+    """Return a dependency-free visual signature for a small marketplace icon."""
+    import fitz
+
+    pixmap = fitz.Pixmap(image_bytes)
+    if pixmap.n >= 4:
+        pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+    channels = pixmap.n
+    colored = []
+    hues = []
+    saturations = []
+    for offset in range(0, len(pixmap.samples), channels):
+        red, green, blue = pixmap.samples[offset:offset + 3]
+        if max(red, green, blue) - min(red, green, blue) < 20:
+            continue
+        colored.append((red, green, blue))
+        hue, saturation, _ = colorsys.rgb_to_hsv(red / 255.0, green / 255.0, blue / 255.0)
+        hues.append(hue)
+        saturations.append(saturation)
+    if not colored:
+        raise ValueError("Marketplace icon contains no identifiable color")
+    count = float(len(colored))
+    mean_rgb = tuple(sum(pixel[channel] for pixel in colored) / count for channel in range(3))
+    # Circular averaging keeps red icons from being split at the 0/1 hue boundary.
+    mean_sin = sum(math.sin(2 * math.pi * hue) for hue in hues)
+    mean_cos = sum(math.cos(2 * math.pi * hue) for hue in hues)
+    mean_hue = (0.0 if not mean_sin and not mean_cos else
+                (math.atan2(mean_sin, mean_cos) / (2 * math.pi)) % 1.0)
+    return mean_rgb + (mean_hue, sum(saturations) / count)
+
+
+def _pdf_icon_distance(left: tuple, right: tuple) -> float:
+    rgb_distance = sum((left[index] - right[index]) ** 2 for index in range(3)) ** 0.5 / 255.0
+    hue_distance = abs(left[3] - right[3])
+    hue_distance = min(hue_distance, 1.0 - hue_distance)
+    saturation_distance = abs(left[4] - right[4])
+    return rgb_distance + (0.25 * hue_distance) + (0.1 * saturation_distance)
+
+
+def _pdf_key_icons(keys_path: Path) -> List[tuple]:
+    """Read icon images and their labels from Keys.pdf in display order."""
+    keys_path = Path(keys_path)
+    try:
+        import fitz
+    except ImportError as error:
+        raise RuntimeError("PDF order support requires PyMuPDF; install requirements.txt") from error
+
+    if not keys_path.is_file():
+        raise FileNotFoundError("Marketplace icon key was not found: {}".format(keys_path))
+    icons = []
+    with fitz.open(str(keys_path)) as document:
+        for page in document:
+            words = page.get_text("words", sort=True)
+            for image in page.get_image_info(xrefs=True):
+                x0, y0, x1, y1 = image["bbox"]
+                label_words = [word for word in words
+                               if word[0] >= x1 - 2
+                               and word[1] <= y1
+                               and word[3] >= y0
+                               and word[4] != "="]
+                label = " ".join(word[4] for word in sorted(label_words, key=lambda word: word[0])).strip()
+                if not label:
+                    continue
+                xref = image.get("xref")
+                if not xref:
+                    continue
+                image_bytes = document.extract_image(xref)["image"]
+                icons.append((label, _pdf_icon_signature(image_bytes)))
+    if not icons:
+        raise ValueError("Keys.pdf contains no labeled marketplace icons")
+    return icons
+
+
+def _pdf_order_icon(page: Any, document: Any, keys_path: Path) -> str:
+    try:
+        import fitz  # noqa: F401
+    except ImportError as error:
+        raise RuntimeError("PDF order support requires PyMuPDF; install requirements.txt") from error
+
+    words = page.get_text("words", sort=True)
+    order_words = [word for word in words if _normalise_label(word[4]).startswith(_normalise_label("주문번호"))]
+    if not order_words:
+        raise ValueError("PDF is missing 주문번호 and its marketplace icon")
+    order_y = sum((word[1] + word[3]) / 2 for word in order_words) / len(order_words)
+    images = page.get_image_info(xrefs=True)
+    if not images:
+        raise ValueError("PDF 주문번호 has no marketplace icon")
+    image = min(images, key=lambda candidate: abs((candidate["bbox"][1] + candidate["bbox"][3]) / 2 - order_y))
+    xref = image.get("xref")
+    if not xref:
+        raise ValueError("Could not identify the marketplace icon in 주문번호")
+    target_signature = _pdf_icon_signature(document.extract_image(xref)["image"])
+    keys = _pdf_key_icons(keys_path)
+    return min(keys, key=lambda candidate: _pdf_icon_distance(target_signature, candidate[1]))[0]
+
+
+def _pdf_items(page: Any) -> List[Item]:
+    words = page.get_text("words", sort=True)
+    header = next((word for word in words if _normalise_label(word[4]) == _normalise_label("상품/옵션")), None)
+    if header is None:
+        return []
+    quantity_header = next((word for word in words
+                            if _normalise_label(word[4]) == _normalise_label("수량")
+                            and abs(word[1] - header[1]) < 4), None)
+    if quantity_header is None:
+        return []
+    sale_header = next((word for word in words
+                        if _normalise_label(word[4]) == _normalise_label("판매가")
+                        and abs(word[1] - header[1]) < 4), None)
+    quantity_x = quantity_header[0]
+    sale_x = sale_header[0] if sale_header else quantity_x + 50
+    total_word = next((word for word in words
+                       if _normalise_label(word[4]) == _normalise_label("계")
+                       and word[0] < quantity_x), None)
+    if total_word is None:
+        return []
+
+    table_words = [word for word in words
+                   if word[1] > header[3] and word[3] < total_word[1] + 1]
+    lines = []
+    for word in table_words:
+        if not lines or abs(word[1] - lines[-1][0]) > 2:
+            lines.append([word[1], [word]])
+        else:
+            lines[-1][1].append(word)
+
+    items = []
+    pending_name = []
+    current = None
+    for _, line_words in lines:
+        line_words.sort(key=lambda word: word[0])
+        quantity = next((word[4].replace(",", "") for word in line_words
+                         if quantity_x - 4 <= word[0] < sale_x - 3
+                         and re.fullmatch(r"\d+", word[4].replace(",", ""))), "")
+        name = " ".join(word[4] for word in line_words if word[0] < quantity_x - 3).strip()
+        if name == "계":
+            continue
+        if quantity:
+            if current is not None:
+                items.append(Item(**current))
+            item_name = ""
+            for part in pending_name + ([name] if name else []):
+                item_name = _join_pdf_item_text(item_name, part)
+            current = {"name": item_name,
+                       "quantity": quantity, "code": "", "unit": "개"}
+            pending_name = []
+        elif name:
+            if current is None:
+                pending_name.append(name)
+            else:
+                current["name"] = _join_pdf_item_text(current["name"], name)
+    if current is not None:
+        items.append(Item(**current))
+    return [item for item in items if item.name or item.quantity]
+
+
+def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseOrder:
+    """Extract one marketplace order PDF using the icon definitions in Keys.pdf."""
+    try:
+        import fitz
+    except ImportError as error:
+        raise RuntimeError("PDF order support requires PyMuPDF; install requirements.txt") from error
+
+    keys_path = Path(keys_path) if keys_path else application_root() / "Keys.pdf"
+    with fitz.open(str(path)) as document:
+        if not document:
+            return PurchaseOrder(items=[])
+        page = document[0]
+        lines = _pdf_lines(page)
+        date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
+                               "\n".join(lines))
+        order_date = _parse_order_date(date_match.group(1)) if date_match else None
+        address = _pdf_line_value(lines, "배송지 주소", multiline=True, stop_labels=("배송메시지",))
+        memo = _pdf_line_value(lines, "배송메시지", stop_labels=("수령자정보", "주문자정보"))
+        return PurchaseOrder(
+            order_date=order_date,
+            recipient=_pdf_line_value(lines, "수령자명"),
+            phone=_pdf_recipient_phone(page),
+            address=address,
+            company=_pdf_order_icon(page, document, keys_path),
+            memo=memo,
+            remarks=memo,
+            items=_pdf_items(page),
+        )
+
+
 def extract_purchase_order(path: Path) -> PurchaseOrder:
-    """Extract the structured order fields from an XLSX workbook."""
+    """Extract the structured order fields from an XLSX workbook or order PDF."""
+    if path.suffix.lower() == ".pdf":
+        return extract_pdf_order(path)
+
     try:
         from openpyxl import load_workbook
     except ImportError as error:
@@ -794,7 +1052,7 @@ def confidence_reasons(order: PurchaseOrder) -> List[str]:
     return reasons
 
 
-def missing_required_fields(order: PurchaseOrder) -> List[str]:
+def missing_required_fields(order: PurchaseOrder, source_format: str = "xlsx") -> List[str]:
     """Return the input columns that must be populated before import."""
     missing = []
     recipient_is_phone = False
@@ -802,18 +1060,30 @@ def missing_required_fields(order: PurchaseOrder) -> List[str]:
         recipient_digits = order.recipient.replace("-", "")
         phone_digits = order.phone.replace("-", "")
         recipient_is_phone = recipient_digits.isdigit() and recipient_digits == phone_digits
-    required_fields = (
-        ("발주일자", order.order_date),
-        ("발주처", order.company),
-        ("담당자", order.manager),
-        ("이메일", order.email),
-        ("발주사업자등록증번호", order.business_registration_number),
-        ("사업자 주소", order.business_address),
-        ("연락처", order.contact),
-        ("수령인", "" if recipient_is_phone else order.recipient),
-        ("수령인 연락처", order.phone),
-        ("배송지 주소", order.address),
-    )
+    if source_format == "pdf":
+        # The marketplace PDF does not contain the business fields used by the
+        # XLSX purchase-order form. Its order-specific required fields are the
+        # fields that can be copied from the PDF into the shared database.
+        required_fields = (
+            ("주문일자", order.order_date),
+            ("업체명", order.company),
+            ("수령자명", "" if recipient_is_phone else order.recipient),
+            ("휴대전화", order.phone),
+            ("배송지 주소", order.address),
+        )
+    else:
+        required_fields = (
+            ("발주일자", order.order_date),
+            ("발주처", order.company),
+            ("담당자", order.manager),
+            ("이메일", order.email),
+            ("발주사업자등록증번호", order.business_registration_number),
+            ("사업자 주소", order.business_address),
+            ("연락처", order.contact),
+            ("수령인", "" if recipient_is_phone else order.recipient),
+            ("수령인 연락처", order.phone),
+            ("배송지 주소", order.address),
+        )
     missing.extend(label for label, value in required_fields if not value)
     if not order.items:
         missing.append("품목")
@@ -1232,12 +1502,12 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
         raise FileNotFoundError("No supported documents found in {}".format(input_dir))
 
     failures = 0
-    xlsx_documents = [path for path in documents if path.suffix.lower() == ".xlsx"]
-    other_documents = [path for path in documents if path.suffix.lower() != ".xlsx"]
+    order_documents = [path for path in documents if path.suffix.lower() in {".xlsx", ".pdf"}]
+    other_documents = [path for path in documents if path.suffix.lower() not in {".xlsx", ".pdf"}]
     confidence_results = []
     missing_filenames = set()
 
-    if xlsx_documents:
+    if order_documents:
         database_path = output_dir / OUTPUT_WORKBOOK_NAME
         database_existed = database_path.exists()
         workbook = _new_database_workbook(database_path)
@@ -1247,14 +1517,16 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
         recorded_filenames = _read_recorded_filenames(output_dir)
         log_path = _input_log_path(output_dir)
         pending_log_entries = []
-        for path in xlsx_documents:
+        for path in order_documents:
             print("Reading {} -> {}".format(path, database_path))
             _file_status_callback(on_file_status, path, input_dir, "reading")
             try:
                 order = extract_purchase_order(path)
                 confidence = confidence_level(order)
                 confidence_results.append(ConfidenceAnalysis(path.name, confidence))
-                missing_fields = missing_required_fields(order)
+                missing_fields = missing_required_fields(
+                    order, "pdf" if path.suffix.lower() == ".pdf" else "xlsx"
+                )
                 if missing_fields:
                     failures += 1
                     missing_filenames.add(path.name)
@@ -1390,7 +1662,7 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read input documents and append XLSX orders to an Excel database."
+        description="Read input documents and append XLSX or PDF orders to an Excel database."
     )
     parser.add_argument("--input", type=Path, default=Path("input"), help="Input folder (default: input)")
     parser.add_argument("--output", type=Path, default=Path("output"), help="Output folder (default: output)")
@@ -1659,7 +1931,7 @@ def _run_application(argv: Optional[Sequence[str]] = None) -> int:
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     documents = iter_documents(input_dir, output_dir)
-    needs_ollama = any(path.suffix.lower() != ".xlsx" for path in documents)
+    needs_ollama = any(path.suffix.lower() not in {".xlsx", ".pdf"} for path in documents)
 
     executable = _runtime_path(args.ollama_executable, root) if args.ollama_executable else (
         bundled_ollama_path(root) if not args.no_ollama_management else None

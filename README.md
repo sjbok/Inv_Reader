@@ -14,7 +14,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Put documents in `input/`. The program supports text files, Markdown, CSV, JSON, HTML, XML, DOCX, XLSX, PDF, and common image formats. XLSX order forms are read directly and appended to `output/2026 한진양식.xlsx` in one `Orders` worksheet. Recognized date formats are normalized before use, including `YYYY/M/D`, `YY/M/D` such as `26/9/3`, and common year-last forms. The worksheet uses the columns 이름, 전화, 우편번호, 주소, 수량, 품목, 운임타입, 지불조건, 특기사항, 업체명, and 비고. 이름 receives the `님` suffix; 전화 must use the 010 or 02~07 prefix and is formatted with hyphens; every 품목 quantity uses the unit `개` and is joined to the item description with `-`; 우편번호 is blank; 수량 is `1`; 운임타입 is `a`; 지불조건 is `신용`; 특기사항 is always `빠른배송바랍니다`; and 비고 combines all messages from both input `특기사항 • 배송 메모` and `비고` fields with comma-space separators, remaining blank when both are empty. Other supported document types continue to use the Ollama summarizer. PDFs with selectable text use layout-aware extraction; scanned PDFs are rendered as images for Qwen3-VL. Text requests use a bounded, non-thinking API path because the `qwen3-vl:8b` Ollama template can otherwise consume the entire response on internal reasoning.
+Put documents in `input/`. The program supports text files, Markdown, CSV, JSON, HTML, XML, DOCX, XLSX, PDF, and common image formats. XLSX order forms and marketplace order PDFs are read directly and appended to `output/2026 한진양식.xlsx` in one `Orders` worksheet. PDF 상품/옵션 and 수량 become 품목, 수령자명 becomes 이름, 휴대전화 becomes 전화, 배송지 주소 becomes 주소, 배송메시지 becomes 비고, and the 주문번호 icon is matched to `Keys.pdf` for 업체명. Recognized date formats are normalized before use, including `YYYY/M/D`, `YY/M/D` such as `26/9/3`, and common year-last forms. The worksheet uses the columns 이름, 전화, 우편번호, 주소, 수량, 품목, 운임타입, 지불조건, 특기사항, 업체명, and 비고. 이름 receives the `님` suffix; 전화 must use the 010 or 02~07 prefix and is formatted with hyphens; every 품목 quantity uses the unit `개` and is joined to the item description with `-`; 우편번호 is blank; 수량 is `1`; 운임타입 is `a`; 지불조건 is `신용`; 특기사항 is always `빠른배송바랍니다`; and 비고 combines all messages from both input `특기사항 • 배송 메모` and `비고` fields with comma-space separators, remaining blank when both are empty. Other supported document types continue to use the Ollama summarizer. Text requests use a bounded, non-thinking API path because the `qwen3-vl:8b` Ollama template can otherwise consume the entire response on internal reasoning.
 
 Start Ollama, then run:
 
@@ -22,7 +22,7 @@ Start Ollama, then run:
 python3 -m src.summarize_documents
 ```
 
-XLSX files are appended to the shared workbook. `output/processed_files.txt` records input filenames already processed. A file is reported as `DUPLICATE` and skipped only when its filename is logged and all five identity fields (이름, 전화, 주소, 품목, 업체명) match an existing row. Files missing required import fields (발주일자, 발주처, 담당자, 이메일, 발주사업자등록증번호, 사업자 주소, 연락처, 수령인, 수령인 연락처, 배송지 주소, or item name/quantity data) are skipped, marked failed in the GUI, and listed with the empty columns in a popup. 납품처 is ignored and may be blank. The program prints a confidence percentage for every XLSX file and marks results below 90% with `HUMAN REVIEW REQUIRED`. Non-XLSX documents produce one UTF-8 text file in `output/`; input directories are searched recursively and nested paths are flattened with `__` in the output filename.
+XLSX and PDF order files are appended to the shared workbook. `output/processed_files.txt` records input filenames already processed. A file is reported as `DUPLICATE` and skipped only when its filename is logged and all five identity fields (이름, 전화, 주소, 품목, 업체명) match an existing row. Files missing required import fields are skipped, marked failed in the GUI, and listed with the empty columns in a popup. XLSX requires the existing business/order fields; PDF requires 주문일자, 업체명, 수령자명, 휴대전화, 배송지 주소, and item name/quantity data. 납품처 is ignored and may be blank. The program prints a confidence percentage for every order file and marks results below 90% with `HUMAN REVIEW REQUIRED`. Non-order documents produce one UTF-8 text file in `output/`; input directories are searched recursively and nested paths are flattened with `__` in the output filename.
 
 Useful options:
 
@@ -171,3 +171,8 @@ For development or an existing Ollama server, the original command still works:
 ```bash
 python3 -m src.summarize_documents --no-ollama-management
 ```
+
+Marketplace PDFs are imported directly into the shared workbook. 상품/옵션 and 수량
+become 품목, 수령자명 becomes 이름, 휴대전화 becomes 전화, 배송지 주소 becomes 주소,
+and 배송메시지 becomes 비고. The icon beside 주문번호 is matched against the labeled
+icons in the root `Keys.pdf` file for 업체명.
