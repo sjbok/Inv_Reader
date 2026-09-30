@@ -811,6 +811,41 @@ def _join_pdf_item_text(left: str, right: str) -> str:
     return left + " " + right
 
 
+def _pdf_is_blue_color(color: Any) -> bool:
+    if not isinstance(color, int):
+        return False
+    red = (color >> 16) & 0xFF
+    green = (color >> 8) & 0xFF
+    blue = color & 0xFF
+    return blue > 80 and blue > red * 1.2 and blue > green * 1.1
+
+
+def _pdf_line_is_blue(page: Any, line_words: List[tuple]) -> bool:
+    """Identify blue option text from the span styling of one extracted line."""
+    if not line_words:
+        return False
+    line_top = min(word[1] for word in line_words)
+    line_bottom = max(word[3] for word in line_words)
+    try:
+        blocks = page.get_text("dict", sort=True)["blocks"]
+    except (KeyError, TypeError):
+        return False
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                span_bbox = span.get("bbox", (0, 0, 0, 0))
+                if span_bbox[1] <= line_bottom and span_bbox[3] >= line_top:
+                    if _pdf_is_blue_color(span.get("color")):
+                        return True
+    return False
+
+
+def _append_pdf_item_line(current: str, line: str, extra: bool) -> str:
+    if extra:
+        return "\n".join(part for part in (current, line) if part)
+    return _join_pdf_item_text(current, line)
+
+
 def _pdf_icon_signature(image_bytes: bytes) -> tuple:
     """Return a dependency-free visual signature for a small marketplace icon."""
     import fitz
@@ -938,31 +973,38 @@ def _pdf_items(page: Any) -> List[Item]:
         else:
             lines[-1][1].append(word)
 
+    name_xs = [word[0] for word in table_words if word[0] < quantity_x - 3]
+    main_name_x = min(name_xs) if name_xs else quantity_x
     items = []
-    pending_name = []
+    pending_name = ""
     current = None
     for _, line_words in lines:
         line_words.sort(key=lambda word: word[0])
         quantity = next((word[4].replace(",", "") for word in line_words
                          if quantity_x - 4 <= word[0] < sale_x - 3
                          and re.fullmatch(r"\d+", word[4].replace(",", ""))), "")
-        name = " ".join(word[4] for word in line_words if word[0] < quantity_x - 3).strip()
+        name_words = [word for word in line_words if word[0] < quantity_x - 3]
+        name = " ".join(word[4] for word in name_words).strip()
         if name == "계":
+            continue
+        extra = bool(name_words) and (
+            min(word[0] for word in name_words) > main_name_x + 4
+            or _pdf_line_is_blue(page, line_words)
+        )
+        if extra and "원" in name:
             continue
         if quantity:
             if current is not None:
                 items.append(Item(**current))
-            item_name = ""
-            for part in pending_name + ([name] if name else []):
-                item_name = _join_pdf_item_text(item_name, part)
+            item_name = _append_pdf_item_line(pending_name, name, extra) if name else pending_name
             current = {"name": item_name,
                        "quantity": quantity, "code": "", "unit": "개"}
-            pending_name = []
+            pending_name = ""
         elif name:
             if current is None:
-                pending_name.append(name)
+                pending_name = _append_pdf_item_line(pending_name, name, extra)
             else:
-                current["name"] = _join_pdf_item_text(current["name"], name)
+                current["name"] = _append_pdf_item_line(current["name"], name, extra)
     if current is not None:
         items.append(Item(**current))
     return [item for item in items if item.name or item.quantity]

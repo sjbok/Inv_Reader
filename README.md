@@ -177,3 +177,5 @@ become 품목, 수령자명 becomes 이름, 휴대전화 becomes 전화, 배송�
 and 배송메시지 becomes 비고. The icon beside 주문번호 is matched against the labeled
 icons in the root `Keys.pdf` file for 업체명. A multi-page PDF is treated as one
 independent order input per page, with page-specific duplicate tracking.
+Indented blue 상품/옵션 lines are preserved as separate lines; an indented blue
+line containing `원` is omitted as an extra-price line only.
