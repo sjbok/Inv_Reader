@@ -175,4 +175,5 @@ python3 -m src.summarize_documents --no-ollama-management
 Marketplace PDFs are imported directly into the shared workbook. 상품/옵션 and 수량
 become 품목, 수령자명 becomes 이름, 휴대전화 becomes 전화, 배송지 주소 becomes 주소,
 and 배송메시지 becomes 비고. The icon beside 주문번호 is matched against the labeled
-icons in the root `Keys.pdf` file for 업체명.
+icons in the root `Keys.pdf` file for 업체명. A multi-page PDF is treated as one
+independent order input per page, with page-specific duplicate tracking.

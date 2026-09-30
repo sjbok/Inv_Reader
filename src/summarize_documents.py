@@ -884,7 +884,8 @@ def _pdf_key_icons(keys_path: Path) -> List[tuple]:
     return icons
 
 
-def _pdf_order_icon(page: Any, document: Any, keys_path: Path) -> str:
+def _pdf_order_icon(page: Any, document: Any, keys_path: Path,
+                    key_icons: Optional[List[tuple]] = None) -> str:
     try:
         import fitz  # noqa: F401
     except ImportError as error:
@@ -903,7 +904,7 @@ def _pdf_order_icon(page: Any, document: Any, keys_path: Path) -> str:
     if not xref:
         raise ValueError("Could not identify the marketplace icon in 주문번호")
     target_signature = _pdf_icon_signature(document.extract_image(xref)["image"])
-    keys = _pdf_key_icons(keys_path)
+    keys = key_icons if key_icons is not None else _pdf_key_icons(keys_path)
     return min(keys, key=lambda candidate: _pdf_icon_distance(target_signature, candidate[1]))[0]
 
 
@@ -967,8 +968,28 @@ def _pdf_items(page: Any) -> List[Item]:
     return [item for item in items if item.name or item.quantity]
 
 
-def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseOrder:
-    """Extract one marketplace order PDF using the icon definitions in Keys.pdf."""
+def _extract_pdf_order_page(page: Any, document: Any, keys_path: Path,
+                            key_icons: List[tuple]) -> PurchaseOrder:
+    lines = _pdf_lines(page)
+    date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
+                           "\n".join(lines))
+    order_date = _parse_order_date(date_match.group(1)) if date_match else None
+    address = _pdf_line_value(lines, "배송지 주소", stop_labels=("배송메시지",))
+    memo = _pdf_line_value(lines, "배송메시지", stop_labels=("수령자정보", "주문자정보"))
+    return PurchaseOrder(
+        order_date=order_date,
+        recipient=_pdf_line_value(lines, "수령자명"),
+        phone=_pdf_recipient_phone(page),
+        address=address,
+        company=_pdf_order_icon(page, document, keys_path, key_icons),
+        memo=memo,
+        remarks=memo,
+        items=_pdf_items(page),
+    )
+
+
+def extract_pdf_orders(path: Path, keys_path: Optional[Path] = None) -> List[PurchaseOrder]:
+    """Extract one independent marketplace order for every page in a PDF."""
     try:
         import fitz
     except ImportError as error:
@@ -977,24 +998,18 @@ def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseO
     keys_path = Path(keys_path) if keys_path else application_root() / "Keys.pdf"
     with fitz.open(str(path)) as document:
         if not document:
-            return PurchaseOrder(items=[])
-        page = document[0]
-        lines = _pdf_lines(page)
-        date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
-                               "\n".join(lines))
-        order_date = _parse_order_date(date_match.group(1)) if date_match else None
-        address = _pdf_line_value(lines, "배송지 주소", stop_labels=("배송메시지",))
-        memo = _pdf_line_value(lines, "배송메시지", stop_labels=("수령자정보", "주문자정보"))
-        return PurchaseOrder(
-            order_date=order_date,
-            recipient=_pdf_line_value(lines, "수령자명"),
-            phone=_pdf_recipient_phone(page),
-            address=address,
-            company=_pdf_order_icon(page, document, keys_path),
-            memo=memo,
-            remarks=memo,
-            items=_pdf_items(page),
-        )
+            return []
+        key_icons = _pdf_key_icons(keys_path)
+        return [
+            _extract_pdf_order_page(page, document, keys_path, key_icons)
+            for page in document
+        ]
+
+
+def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseOrder:
+    """Extract the first marketplace order from a PDF."""
+    orders = extract_pdf_orders(path, keys_path)
+    return orders[0] if orders else PurchaseOrder(items=[])
 
 
 def extract_purchase_order(path: Path) -> PurchaseOrder:
@@ -1495,6 +1510,69 @@ def _file_status_callback(callback: Optional[Callable[[FileProcessingStatus], No
         ))
 
 
+def _document_orders(path: Path, input_dir: Path) -> List[tuple]:
+    """Return orders with a unique processed-file identity for each PDF page."""
+    if path.suffix.lower() == ".pdf":
+        return [
+            (
+                order,
+                "{}#page-{}".format(path.name, page_number),
+                "{}#page-{}".format(path.relative_to(input_dir), page_number),
+            )
+            for page_number, order in enumerate(extract_pdf_orders(path), 1)
+        ]
+    return [(extract_purchase_order(path), path.name, str(path.relative_to(input_dir)))]
+
+
+def _validate_order_for_import(path: Path, input_dir: Path, order: PurchaseOrder,
+                               source_name: str, report: Optional[ProcessingReport],
+                               on_file_status: Optional[Callable[[FileProcessingStatus], None]]) -> tuple:
+    """Apply shared validation rules to one XLSX order or one PDF page."""
+    confidence = confidence_level(order)
+    missing_fields = missing_required_fields(
+        order, "pdf" if path.suffix.lower() == ".pdf" else "xlsx"
+    )
+    if missing_fields:
+        if report is not None:
+            report.missing_data.append(MissingData(source_name, missing_fields))
+        _file_status_callback(
+            on_file_status,
+            path,
+            input_dir,
+            "failed",
+            confidence,
+            "Missing required data: {}".format(", ".join(missing_fields)),
+        )
+        print("ERROR: {}: missing required data: {}".format(
+            source_name, ", ".join(missing_fields)
+        ), file=sys.stderr)
+        return confidence, False, True
+    if any(character.isdigit() for character in order.recipient):
+        reason = "수령인에는 숫자를 사용할 수 없습니다"
+        if report is not None:
+            report.invalid_data.append(InvalidData(source_name, "수령인", reason))
+        _file_status_callback(on_file_status, path, input_dir, "failed", confidence, reason)
+        print("ERROR: {}: invalid 수령인: {}".format(source_name, reason), file=sys.stderr)
+        return confidence, False, False
+    try:
+        order.phone = format_phone_number(order.phone)
+    except ValueError as error:
+        if report is not None:
+            report.invalid_data.append(InvalidData(source_name, "전화", str(error)))
+        _file_status_callback(on_file_status, path, input_dir, "failed", confidence, str(error))
+        print("ERROR: {}: invalid 전화: {}".format(source_name, error), file=sys.stderr)
+        return confidence, False, False
+    _file_status_callback(
+        on_file_status,
+        path,
+        input_dir,
+        "low_confidence" if confidence < 90.0 else "success",
+        confidence,
+        ", ".join(confidence_reasons(order)) if confidence < 90.0 else "",
+    )
+    return confidence, True, False
+
+
 def process_documents(input_dir: Path, output_dir: Path, client: Optional[OllamaClient] = None,
                       chunk_size: int = DEFAULT_CHUNK_SIZE,
                       report: Optional[ProcessingReport] = None,
@@ -1529,94 +1607,55 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
             print("Reading {} -> {}".format(path, database_path))
             _file_status_callback(on_file_status, path, input_dir, "reading")
             try:
-                order = extract_purchase_order(path)
-                confidence = confidence_level(order)
-                confidence_results.append(ConfidenceAnalysis(path.name, confidence))
-                missing_fields = missing_required_fields(
-                    order, "pdf" if path.suffix.lower() == ".pdf" else "xlsx"
-                )
-                if missing_fields:
-                    failures += 1
-                    missing_filenames.add(path.name)
-                    if report is not None:
-                        report.missing_data.append(MissingData(
-                            str(path.relative_to(input_dir)), missing_fields
-                        ))
-                    _file_status_callback(
-                        on_file_status,
-                        path,
-                        input_dir,
-                        "failed",
-                        confidence,
-                        "Missing required data: {}".format(", ".join(missing_fields)),
-                    )
-                    print("ERROR: {}: missing required data: {}".format(
-                        path, ", ".join(missing_fields)
-                    ), file=sys.stderr)
-                    continue
-                if any(character.isdigit() for character in order.recipient):
-                    failures += 1
-                    reason = "수령인에는 숫자를 사용할 수 없습니다"
-                    if report is not None:
-                        report.invalid_data.append(InvalidData(
-                            str(path.relative_to(input_dir)), "수령인", reason
-                        ))
-                    _file_status_callback(
-                        on_file_status, path, input_dir, "failed", confidence, reason
-                    )
-                    print("ERROR: {}: invalid 수령인: {}".format(path, reason), file=sys.stderr)
-                    continue
-                try:
-                    order.phone = format_phone_number(order.phone)
-                except ValueError as error:
-                    failures += 1
-                    if report is not None:
-                        report.invalid_data.append(InvalidData(
-                            str(path.relative_to(input_dir)), "전화", str(error)
-                        ))
-                    _file_status_callback(
-                        on_file_status, path, input_dir, "failed", confidence, str(error)
-                    )
-                    print("ERROR: {}: invalid 전화: {}".format(path, error), file=sys.stderr)
-                    continue
-                _file_status_callback(
-                    on_file_status,
-                    path,
-                    input_dir,
-                    "low_confidence" if confidence < 90.0 else "success",
-                    confidence,
-                    ", ".join(confidence_reasons(order)) if confidence < 90.0 else "",
-                )
-                extracted_orders.append((path, order))
+                document_orders = _document_orders(path, input_dir)
             except Exception as error:
                 failures += 1
                 confidence_results.append(ConfidenceAnalysis(path.name, 0.0))
                 _file_status_callback(on_file_status, path, input_dir, "error", 0.0, str(error))
                 print("ERROR: {}: {}".format(path, error), file=sys.stderr)
+                continue
+            for order, processed_name, source_name in document_orders:
+                try:
+                    confidence, valid, missing = _validate_order_for_import(
+                        path, input_dir, order, source_name, report, on_file_status
+                    )
+                except Exception as error:
+                    failures += 1
+                    confidence_results.append(ConfidenceAnalysis(source_name, 0.0))
+                    _file_status_callback(on_file_status, path, input_dir, "error", 0.0, str(error))
+                    print("ERROR: {}: {}".format(source_name, error), file=sys.stderr)
+                    continue
+                confidence_results.append(ConfidenceAnalysis(source_name, confidence))
+                if not valid:
+                    failures += 1
+                    if missing:
+                        missing_filenames.add(source_name)
+                    continue
+                extracted_orders.append((path, processed_name, source_name, order))
 
-        for path, order in sorted(
+        for path, processed_name, source_name, order in sorted(
             extracted_orders,
-            key=lambda result: (_sheet_name(result[1]) if result[1].order_date else "99.99",
-                                result[0].name),
+            key=lambda result: (_sheet_name(result[3]) if result[3].order_date else "99.99",
+                                result[0].name, result[1]),
         ):
             order_identities = _order_identities(order)
             if (
-                path.name in recorded_filenames
+                processed_name in recorded_filenames
                 and order_identities
                 and order_identities.issubset(existing_identities)
             ):
                 if report is not None:
-                    report.duplicates.append(str(path.relative_to(input_dir)))
+                    report.duplicates.append(source_name)
                 _file_status_callback(on_file_status, path, input_dir, "duplicate")
                 print("DUPLICATE: {} is already recorded in {}; skipping.".format(
-                    path.name, log_path.name
+                    source_name, log_path.name
                 ))
                 continue
             try:
                 append_order_to_workbook(workbook, order)
                 existing_identities.update(order_identities)
-                recorded_filenames.add(path.name)
-                pending_log_entries.append(path.name)
+                recorded_filenames.add(processed_name)
+                pending_log_entries.append(processed_name)
             except Exception as error:
                 failures += 1
                 _file_status_callback(on_file_status, path, input_dir, "error", message=str(error))

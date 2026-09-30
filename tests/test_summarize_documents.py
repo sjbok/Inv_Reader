@@ -758,6 +758,49 @@ class SummarizerTests(unittest.TestCase):
             workbook.close()
             self.assertEqual(client.prompts, [])
 
+    def test_multi_page_pdf_appends_and_deduplicates_each_page_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            pdf = input_dir / "merged.pdf"
+            pdf.write_bytes(b"not parsed by the patched extractor")
+            page_orders = [
+                PurchaseOrder(
+                    order_date=date(2026, 9, 15),
+                    recipient="첫 고객",
+                    phone="010-1111-1111",
+                    address="첫 주소",
+                    company="G 마켓",
+                    items=[Item(name="첫 상품", quantity="2", unit="개")],
+                ),
+                PurchaseOrder(
+                    order_date=date(2026, 9, 16),
+                    recipient="둘 고객",
+                    phone="010-2222-2222",
+                    address="둘 주소",
+                    company="쿠팡",
+                    items=[Item(name="둘 상품", quantity="3", unit="개")],
+                ),
+            ]
+
+            with patch("src.summarize_documents.extract_pdf_orders", return_value=page_orders):
+                self.assertEqual(process_documents(input_dir, output_dir), 0)
+                report = ProcessingReport([], [])
+                self.assertEqual(process_documents(input_dir, output_dir, report=report), 0)
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(workbook["Orders"].max_row, 3)
+            self.assertEqual(workbook["Orders"].cell(2, 1).value, "첫 고객님")
+            self.assertEqual(workbook["Orders"].cell(3, 1).value, "둘 고객님")
+            workbook.close()
+            self.assertEqual(report.duplicates, ["merged.pdf#page-1", "merged.pdf#page-2"])
+            self.assertEqual(
+                (output_dir / "processed_files.txt").read_text(encoding="utf-8"),
+                "merged.pdf#page-1\nmerged.pdf#page-2\n",
+            )
+
     def test_summarizes_text_into_flat_output_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
