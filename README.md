@@ -180,5 +180,7 @@ independent order input per page, written to the workbook in source-page order w
 page-specific duplicate tracking.
 Indented blue 상품/옵션 lines are appended with ` | ` separators; an indented blue
 line containing a numeric amount ending in `원` is omitted as an extra-price line only.
+For PDF items, `-수량개` is placed before the first blue-option separator; blue lines
+without `:` continue the preceding blue line.
 Recipient names may contain Korean/text characters and numbers; names containing only
 numbers are rejected.

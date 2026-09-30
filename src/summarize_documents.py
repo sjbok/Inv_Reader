@@ -91,6 +91,7 @@ class Item:
     name: str = ""
     quantity: str = ""
     unit: str = ""
+    quantity_before_options: bool = False
 
 
 @dataclass
@@ -840,8 +841,11 @@ def _pdf_line_is_blue(page: Any, line_words: List[tuple]) -> bool:
     return False
 
 
-def _append_pdf_item_line(current: str, line: str, extra: bool) -> str:
+def _append_pdf_item_line(current: str, line: str, extra: bool, blue: bool = False) -> str:
     if extra:
+        if blue and ":" not in line and "：" not in line:
+            if " | " in current:
+                return current + line
         return " | ".join(part for part in (current, line) if part)
     return _join_pdf_item_text(current, line)
 
@@ -991,24 +995,29 @@ def _pdf_items(page: Any) -> List[Item]:
         name = " ".join(word[4] for word in name_words).strip()
         if name == "계":
             continue
+        blue = _pdf_line_is_blue(page, line_words)
         extra = bool(name_words) and (
             min(word[0] for word in name_words) > main_name_x + 4
-            or _pdf_line_is_blue(page, line_words)
+            or blue
         )
         if extra and _pdf_is_extra_price_line(name):
             continue
         if quantity:
             if current is not None:
                 items.append(Item(**current))
-            item_name = _append_pdf_item_line(pending_name, name, extra) if name else pending_name
+            item_name = (_append_pdf_item_line(pending_name, name, extra, blue)
+                         if name else pending_name)
             current = {"name": item_name,
-                       "quantity": quantity, "code": "", "unit": "개"}
+                       "quantity": quantity, "code": "", "unit": "개",
+                       "quantity_before_options": True}
             pending_name = ""
         elif name:
             if current is None:
-                pending_name = _append_pdf_item_line(pending_name, name, extra)
+                pending_name = _append_pdf_item_line(pending_name, name, extra, blue)
             else:
-                current["name"] = _append_pdf_item_line(current["name"], name, extra)
+                current["name"] = _append_pdf_item_line(
+                    current["name"], name, extra, blue
+                )
     if current is not None:
         items.append(Item(**current))
     return [item for item in items if item.name or item.quantity]
@@ -1176,6 +1185,9 @@ def _item_text(item: Item) -> str:
         description.append(item.name)
     quantity = "{}개".format(item.quantity) if item.quantity else ""
     item_description = " ".join(description)
+    if item.quantity_before_options and quantity and " | " in item_description:
+        main_description, options = item_description.split(" | ", 1)
+        return "{}-{} | {}".format(main_description, quantity, options)
     if item_description and quantity:
         return "{}-{}".format(item_description, quantity)
     return item_description or quantity
