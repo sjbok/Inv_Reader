@@ -43,6 +43,8 @@ from src.summarize_documents import (
     _item_text,
     _pdf_items,
     _pdf_line_value,
+    _pdf_recipient_phone,
+    _normalise_pdf_address,
 )
 
 
@@ -273,6 +275,8 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(format_phone_number("051234567890"), "0512-3456-7890")
         self.assertEqual(format_phone_number("0612345678"), "061-234-5678")
         self.assertEqual(format_phone_number("07123456789"), "071-2345-6789")
+        self.assertEqual(format_phone_number("0504-1234-567"), "0504-1234-567")
+        self.assertEqual(format_phone_number("0504-1234-5678"), "0504-1234-5678")
         with self.assertRaisesRegex(ValueError, "0으로 시작"):
             format_phone_number("1012345678")
         with self.assertRaisesRegex(ValueError, "010 또는 02~07"):
@@ -767,7 +771,7 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(order.phone, "010-4238-4338")
         self.assertEqual(
             order.address,
-            "(31202) 충청남도 천안시 동남구 풍세로 801-28 "
+            "충청남도 천안시 동남구 풍세로 801-28 "
             "(천안청룡초등학교) 천안청룡초 3학년",
         )
         self.assertEqual(order.company, "G 마켓")
@@ -795,6 +799,36 @@ class SummarizerTests(unittest.TestCase):
             ),
             "주소값",
         )
+
+    def test_pdf_address_removes_only_leading_parenthesized_value(self):
+        self.assertEqual(
+            _normalise_pdf_address("(31202) 충청남도 천안시"),
+            "충청남도 천안시",
+        )
+        self.assertEqual(
+            _normalise_pdf_address("충청남도 천안시 (학교)"),
+            "충청남도 천안시 (학교)",
+        )
+
+    def test_pdf_phone_falls_back_to_mobile_when_general_phone_is_empty(self):
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                if kind == "words":
+                    return [
+                        (10, 100, 50, 110, "일반전화", 0, 0, 0),
+                        (70, 100, 110, 110, "휴대전화", 0, 0, 1),
+                        (130, 100, 220, 110, "0504-1234-567", 0, 0, 2),
+                    ]
+                return "일반전화 휴대전화 0504-1234-567"
+
+        self.assertEqual(_pdf_recipient_phone(FakePage()), "0504-1234-567")
+
+    def test_pdf_phone_is_empty_when_general_and_mobile_are_missing(self):
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                return "일반전화 휴대전화" if kind == "text" else []
+
+        self.assertEqual(_pdf_recipient_phone(FakePage()), "")
 
     def test_pdf_items_preserve_all_blue_options_but_skip_one_price_line(self):
         words = [

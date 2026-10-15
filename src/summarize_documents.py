@@ -741,6 +741,11 @@ def _pdf_lines(page: Any) -> List[str]:
     return [line.strip() for line in page.get_text("text", sort=True).splitlines()]
 
 
+def _normalise_pdf_address(address: str) -> str:
+    """Remove a leading parenthesized postal code or qualifier from a PDF address."""
+    return re.sub(r"^\([^)]*\)\s*", "", address)
+
+
 def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
                     multiline: bool = False, stop_labels: Optional[Sequence[str]] = None) -> str:
     """Read the value following a PDF label, including values wrapped to later lines."""
@@ -781,24 +786,40 @@ def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
     return " ".join(values).strip()
 
 
+def _pdf_phone_from_text(value: str) -> str:
+    for match in re.finditer(r"(?<!\d)0(?:[\d-]\s*){8,15}(?!\d)", value):
+        phone = re.sub(r"\s+", "", match.group(0))
+        if 9 <= len(phone.replace("-", "")) <= 12:
+            return phone
+    return ""
+
+
 def _pdf_recipient_phone(page: Any) -> str:
     words = page.get_text("words", sort=True)
-    labels = [word for word in words if _normalise_label(word[4]) == _normalise_label("휴대전화")]
-    if not labels:
-        return ""
-    label = max(labels, key=lambda word: word[1])
-    same_line = [word for word in words
-                 if word[0] > label[2] - 2 and abs(word[1] - label[1]) < 2]
-    phone = next((word[4] for word in same_line
-                  if re.fullmatch(r"0[0-9-]+", word[4])), "")
-    if phone:
-        return phone
-    for line in reversed(_pdf_lines(page)):
-        marker = line.find("휴대전화")
-        if marker >= 0:
-            phone_match = re.search(r"0[0-9-]{8,12}", line[marker + len("휴대전화"):])
-            if phone_match:
-                return phone_match.group(0)
+    labels = {
+        label: [word for word in words if _normalise_label(word[4]) == _normalise_label(label)]
+        for label in ("일반전화", "휴대전화")
+    }
+    for label_name in ("일반전화", "휴대전화"):
+        for label in sorted(labels[label_name], key=lambda word: word[1], reverse=True):
+            label_center = (label[1] + label[3]) / 2
+            same_line = sorted(
+                (word for word in words
+                 if word[0] > label[2] - 2
+                 and abs((word[1] + word[3]) / 2 - label_center) < 3),
+                key=lambda word: word[0],
+            )
+            phone = _pdf_phone_from_text(" ".join(word[4] for word in same_line))
+            if phone:
+                return phone
+
+    for label_name in ("일반전화", "휴대전화"):
+        for line in reversed(_pdf_lines(page)):
+            marker = line.find(label_name)
+            if marker >= 0:
+                phone = _pdf_phone_from_text(line[marker + len(label_name):])
+                if phone:
+                    return phone
     return ""
 
 
@@ -1029,7 +1050,9 @@ def _extract_pdf_order_page(page: Any, document: Any, keys_path: Path,
     date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
                            "\n".join(lines))
     order_date = _parse_order_date(date_match.group(1)) if date_match else None
-    address = _pdf_line_value(lines, "배송지 주소", stop_labels=("배송메시지",))
+    address = _normalise_pdf_address(
+        _pdf_line_value(lines, "배송지 주소", stop_labels=("배송메시지",))
+    )
     memo = _pdf_line_value(lines, "배송메시지", stop_labels=("수령자정보", "주문자정보"))
     return PurchaseOrder(
         order_date=order_date,
@@ -1215,6 +1238,7 @@ def format_phone_number(phone: str) -> str:
         "02": {9: (2, 3, 4), 10: (2, 4, 4)},
         "03": {10: (3, 3, 4)},
         "04": {10: (3, 3, 4)},
+        "050": {11: (4, 4, 3), 12: (4, 4, 4)},
         "05": {10: (3, 3, 4), 12: (4, 4, 4)},
         "06": {10: (3, 3, 4)},
         "07": {11: (3, 4, 4)},
