@@ -17,6 +17,7 @@ from src.summarize_documents import (
     ConfidenceAnalysis,
     DocumentContent,
     DATABASE_HEADERS,
+    ICECREAMMALL_COMPANY,
     FileProcessingStatus,
     InvalidData,
     MissingData,
@@ -41,6 +42,7 @@ from src.summarize_documents import (
     summarize_content,
     _parse_order_date,
     _item_text,
+    _icecreammall_phone,
     _pdf_items,
     _pdf_line_value,
     _pdf_recipient_phone,
@@ -783,6 +785,47 @@ class SummarizerTests(unittest.TestCase):
             "금연교육 흡연예방교구 금연의날",
         )
         self.assertEqual(order.items[0].quantity, "5")
+
+    def test_icecreammall_delivery_pdf_extracts_output_fields(self):
+        path = Path("input/아이스크림몰_동해해솔학교.pdf")
+        if not path.is_file():
+            self.skipTest("the user-provided delivery PDF is not present")
+
+        order = extract_pdf_order(path)
+
+        self.assertEqual(order.order_date, date(2026, 10, 5))
+        self.assertEqual(order.recipient, "주효진")
+        self.assertEqual(order.phone, "010-7259-0902")
+        self.assertEqual(order.address, "강원도 동해시 부곡5길 14(부곡동) 동해해솔학교 고등교사연구실")
+        self.assertEqual(order.company, ICECREAMMALL_COMPANY)
+        self.assertEqual(order.remarks, "")
+        self.assertEqual([_item_text(item) for item in order.items], [
+            "마약예방 판박이 스티커 (타투스티커) 약물 오남용 예방 교육용 B 세트(8종)-2개",
+            "마약예방 스마트폰 스트랩 만들기(1인) 약물 오남용 예방 교육용 단일상품-19개",
+        ])
+
+    def test_icecreammall_phone_prefers_mobile_and_falls_back_to_phone(self):
+        class FakePage:
+            def __init__(self, mobile, landline):
+                self.words = [
+                    (10, 10, 50, 20, "휴대폰번호", 0, 0, 0),
+                    (70, 10, 150, 20, mobile, 0, 0, 1),
+                    (10, 30, 50, 40, "전화번호", 0, 0, 2),
+                    (70, 30, 150, 40, landline, 0, 0, 3),
+                ]
+
+            def get_text(self, kind, sort=False):
+                return self.words if kind == "words" else ""
+
+        self.assertEqual(
+            _icecreammall_phone(FakePage("010-1111-2222", "02-333-4444")),
+            "010-1111-2222",
+        )
+        self.assertEqual(
+            _icecreammall_phone(FakePage("", "02-333-4444")),
+            "02-333-4444",
+        )
+        self.assertEqual(_icecreammall_phone(FakePage("", "")), "")
 
     def test_pdf_address_stops_before_inline_delivery_message(self):
         lines = ["배송지 주소 주소값 배송메시지 문 앞에 놓아주세요"]

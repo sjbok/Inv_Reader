@@ -32,6 +32,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1024
 OLLAMA_STARTUP_TIMEOUT = 120
 OUTPUT_WORKBOOK_NAME = "2026 한진양식.xlsx"
 DATABASE_SHEET_NAME = "Orders"
+ICECREAMMALL_COMPANY = "아이스크림몰"
 DATABASE_HEADERS = (
     "이름", "전화", "우편번호", "주소", "수량", "품목", "운임타입", "지불조건",
     "특기사항", "업체명", "비고",
@@ -743,7 +744,7 @@ def _pdf_lines(page: Any) -> List[str]:
 
 def _normalise_pdf_address(address: str) -> str:
     """Remove a leading parenthesized postal code or qualifier from a PDF address."""
-    return re.sub(r"^\([^)]*\)\s*", "", address)
+    return re.sub(r"^\(\d+\)\s*", "", address)
 
 
 def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
@@ -821,6 +822,174 @@ def _pdf_recipient_phone(page: Any) -> str:
                 if phone:
                     return phone
     return ""
+
+
+def _pdf_words_with_label(page: Any, label: str) -> List[tuple]:
+    wanted = _normalise_label(label)
+    return [word for word in page.get_text("words", sort=True)
+            if _normalise_label(word[4]) == wanted]
+
+
+def _icecreammall_recipient(page: Any) -> str:
+    """Read the recipient from the left-hand 수취인 field."""
+    words = page.get_text("words", sort=True)
+    labels = [word for word in words
+              if _normalise_label(word[4]) == _normalise_label("수취인")
+              and word[0] < 180]
+    if not labels:
+        return ""
+    label = min(labels, key=lambda word: (word[1], word[0]))
+    same_line = [word for word in words
+                 if word[0] >= label[2] - 2
+                 and word[0] < 200
+                 and abs((word[1] + word[3]) / 2 - (label[1] + label[3]) / 2) < 4]
+    values = [word[4] for word in sorted(same_line, key=lambda word: word[0])
+              if _normalise_label(word[4]) != _normalise_label("수취인")]
+    return " ".join(values).strip()
+
+
+def _icecreammall_phone(page: Any) -> str:
+    """Prefer 수취인 휴대폰번호, falling back to 수취인 전화번호."""
+    words = page.get_text("words", sort=True)
+    for label_name in ("휴대폰번호", "전화번호"):
+        labels = _pdf_words_with_label(page, label_name)
+        for label in sorted(labels, key=lambda word: (word[1], word[0])):
+            label_center = (label[1] + label[3]) / 2
+            same_line = sorted(
+                (word for word in words
+                 if word[0] >= label[2] - 2
+                 and word[1] < label[3] + 10
+                 and word[3] > label[1] - 10),
+                key=lambda word: word[0],
+            )
+            phone = _pdf_phone_from_text(" ".join(word[4] for word in same_line))
+            if phone:
+                return phone
+            # Some exports place the value one visual line above the label.
+            nearby = [word for word in words
+                      if word[0] >= label[2] - 2
+                      and abs((word[1] + word[3]) / 2 - label_center) < 12]
+            phone = _pdf_phone_from_text(" ".join(word[4] for word in nearby))
+            if phone:
+                return phone
+    return ""
+
+
+def _icecreammall_delivery_note(page: Any) -> str:
+    """Read optional text between 배송 요청사항 and 발송상품."""
+    words = page.get_text("words", sort=True)
+    request_labels = [word for word in words
+                      if _normalise_label(word[4]) in {
+                          _normalise_label("배송"), _normalise_label("요청사항")
+                      }]
+    product_headers = _pdf_words_with_label(page, "발송상품")
+    if not request_labels or not product_headers:
+        return ""
+    start = min(word[1] for word in request_labels)
+    end = min(word[1] for word in product_headers)
+    excluded = {_normalise_label("배송"), _normalise_label("요청사항")}
+    values = [word for word in words
+              if start <= word[1] and word[3] <= end
+              and _normalise_label(word[4]) not in excluded]
+    return " ".join(word[4] for word in sorted(values, key=lambda word: (word[1], word[0]))).strip()
+
+
+def _icecreammall_items(page: Any) -> List[Item]:
+    """Read 상품명 + 단품명 rows from an 아이스크림몰 출고내역서."""
+    words = page.get_text("words", sort=True)
+    headers = {}
+    for label in ("상품명", "단품명", "추가입력옵션", "수량", "판매가"):
+        matches = _pdf_words_with_label(page, label)
+        if matches:
+            headers[label] = min(matches, key=lambda word: word[1])
+    if not all(label in headers for label in ("상품명", "단품명", "수량")):
+        return []
+
+    header_y = max(word[3] for word in headers.values())
+    product_center = (headers["상품명"][0] + headers["상품명"][2]) / 2
+    single_center = (headers["단품명"][0] + headers["단품명"][2]) / 2
+    option_center = ((headers["추가입력옵션"][0] + headers["추가입력옵션"][2]) / 2
+                    if "추가입력옵션" in headers else single_center + 100)
+    quantity_center = (headers["수량"][0] + headers["수량"][2]) / 2
+    sale_center = ((headers["판매가"][0] + headers["판매가"][2]) / 2
+                   if "판매가" in headers else quantity_center + 60)
+    main_limit = (product_center + single_center) / 2
+    single_limit = (single_center + option_center) / 2
+    quantity_lower = (quantity_center + main_limit) / 2
+    quantity_upper = (quantity_center + sale_center) / 2
+
+    quantities = []
+    for word in words:
+        center_x = (word[0] + word[2]) / 2
+        if (word[1] <= header_y or not quantity_lower <= center_x < quantity_upper
+                or not re.fullmatch(r"\d[\d,]*", word[4].replace(",", ""))):
+            continue
+        quantities.append(word)
+    quantities.sort(key=lambda word: word[1])
+    if not quantities:
+        return []
+
+    items = []
+    quantity_centers = [(word[1] + word[3]) / 2 for word in quantities]
+    for index, quantity_word in enumerate(quantities):
+        center_y = quantity_centers[index]
+        lower = header_y if index == 0 else (quantity_centers[index - 1] + center_y) / 2
+        upper = (center_y + quantity_centers[index + 1]) / 2 \
+            if index + 1 < len(quantity_centers) else float("inf")
+        main_words = []
+        single_words = []
+        for word in words:
+            word_center_x = (word[0] + word[2]) / 2
+            word_center_y = (word[1] + word[3]) / 2
+            if not lower < word_center_y < upper:
+                continue
+            if product_center - 120 < word_center_x < main_limit:
+                main_words.append(word)
+            elif main_limit <= word_center_x < single_limit:
+                single_words.append(word)
+
+        def column_text(column_words: List[tuple]) -> str:
+            return " ".join(word[4] for word in sorted(
+                column_words, key=lambda word: (word[1], word[0])
+            )).strip()
+
+        main_name = column_text(main_words)
+        single_name = column_text(single_words)
+        name = " ".join(part for part in (main_name, single_name) if part)
+        items.append(Item(name=name, quantity=quantity_word[4].replace(",", ""), unit="개"))
+    return [item for item in items if item.name or item.quantity]
+
+
+def _is_icecreammall_pdf(page: Any) -> bool:
+    labels = {_normalise_label(word[4]) for word in page.get_text("words", sort=True)}
+    return all(_normalise_label(label) in labels
+               for label in ("수취인", "배송지", "상품명", "단품명"))
+
+
+def _extract_icecreammall_order_page(page: Any) -> PurchaseOrder:
+    lines = _pdf_lines(page)
+    date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
+                           "\n".join(lines))
+    order_date = _parse_order_date(date_match.group(1)) if date_match else None
+    address_words = _pdf_words_with_label(page, "배송지")
+    address = ""
+    if address_words:
+        label = min(address_words, key=lambda word: word[1])
+        address_values = [word for word in page.get_text("words", sort=True)
+                          if word[0] >= label[2] - 2
+                          and abs((word[1] + word[3]) / 2 - (label[1] + label[3]) / 2) < 5]
+        address = " ".join(word[4] for word in sorted(address_values, key=lambda word: word[0])
+                            if _normalise_label(word[4]) != _normalise_label("배송지"))
+    return PurchaseOrder(
+        order_date=order_date,
+        recipient=_icecreammall_recipient(page),
+        phone=_icecreammall_phone(page),
+        address=_normalise_pdf_address(address),
+        company=ICECREAMMALL_COMPANY,
+        memo=_icecreammall_delivery_note(page),
+        remarks=_icecreammall_delivery_note(page),
+        items=_icecreammall_items(page),
+    )
 
 
 def _join_pdf_item_text(left: str, right: str) -> str:
@@ -1045,7 +1214,12 @@ def _pdf_items(page: Any) -> List[Item]:
 
 
 def _extract_pdf_order_page(page: Any, document: Any, keys_path: Path,
-                            key_icons: List[tuple]) -> PurchaseOrder:
+                             key_icons: Optional[List[tuple]]) -> PurchaseOrder:
+    if _is_icecreammall_pdf(page):
+        return _extract_icecreammall_order_page(page)
+
+    if key_icons is None:
+        key_icons = _pdf_key_icons(keys_path)
     lines = _pdf_lines(page)
     date_match = re.search(r"주문일자\s*[:：]?\s*(\d{2,4}[./-]\d{1,2}[./-]\d{1,4})",
                            "\n".join(lines))
@@ -1077,11 +1251,13 @@ def extract_pdf_orders(path: Path, keys_path: Optional[Path] = None) -> List[Pur
     with fitz.open(str(path)) as document:
         if not document:
             return []
-        key_icons = _pdf_key_icons(keys_path)
-        return [
-            _extract_pdf_order_page(page, document, keys_path, key_icons)
-            for page in document
-        ]
+        key_icons = None
+        orders = []
+        for page in document:
+            orders.append(_extract_pdf_order_page(page, document, keys_path, key_icons))
+            if key_icons is None and not _is_icecreammall_pdf(page):
+                key_icons = _pdf_key_icons(keys_path)
+        return orders
 
 
 def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseOrder:
