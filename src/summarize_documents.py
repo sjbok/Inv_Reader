@@ -1204,6 +1204,20 @@ def _pdf_items(page: Any) -> List[Item]:
         elif name:
             if current is None:
                 pending_name = _append_pdf_item_line(pending_name, name, extra, blue)
+            elif not extra:
+                # Some marketplace exports place each quantity on a separate
+                # line immediately after its product name. A non-indented,
+                # non-blue name after an item has been started is therefore a
+                # new item, not a continuation of the previous one.
+                if current["name"]:
+                    items.append(Item(**current))
+                    current = None
+                    pending_name = _append_pdf_item_line("", name, extra, blue)
+                else:
+                    current["name"] = _append_pdf_item_line(
+                        pending_name, name, extra, blue
+                    )
+                    pending_name = ""
             else:
                 current["name"] = _append_pdf_item_line(
                     current["name"], name, extra, blue

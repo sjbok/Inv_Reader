@@ -827,6 +827,19 @@ class SummarizerTests(unittest.TestCase):
         )
         self.assertEqual(_icecreammall_phone(FakePage("", "")), "")
 
+    def test_marketplace_pdf_keeps_names_when_quantity_is_on_next_line(self):
+        path = Path("input/주문상세정보dfd.pdf")
+        if not path.is_file():
+            self.skipTest("the user-provided marketplace PDF is not present")
+
+        order = extract_pdf_order(path)
+
+        self.assertEqual([(item.name, item.quantity) for item in order.items], [
+            ("블루메디케어 소독스프레이 500ml", "8"),
+            ("균이제로 살균티슈(75매) 의약외품 승인", "16"),
+            ("페이스쉴드 50매 (개별포장) / 마우스쉴드", "2"),
+        ])
+
     def test_pdf_address_stops_before_inline_delivery_message(self):
         lines = ["배송지 주소 주소값 배송메시지 문 앞에 놓아주세요"]
 
