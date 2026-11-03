@@ -1054,11 +1054,11 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(
             items[0].name,
-            "검은색상품 추가 설명 안전교육 자료 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
+            "검은색상품추가 설명안전교육 자료 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
         )
         self.assertEqual(
             _item_text(items[0]),
-            "검은색상품 추가 설명 안전교육 자료-2개 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
+            "검은색상품추가 설명안전교육 자료-2개 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
         )
 
     def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):

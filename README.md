@@ -180,8 +180,8 @@ and 배송메시지 becomes 비고. The icon beside 주문번호 is matched agai
 icons in the root `Keys.pdf` file for 업체명. A multi-page PDF is treated as one
 independent order input per page, written to the workbook in source-page order with
 page-specific duplicate tracking.
-Black 상품/옵션 lines are joined into the product name, including wrapped or indented
-lines. Blue option lines are separated with ` | ` when a line starts a new entry with
+Black 상품/옵션 lines are concatenated directly into the product name, with no added
+space between wrapped or indented lines. Blue option lines are separated with ` | ` when a line starts a new entry with
 `:`; wrapped blue lines without a colon continue the preceding entry. An indented blue
 line containing a numeric amount ending in `원` is omitted as an extra-price line only.
 For PDF items, `-수량개` is placed before the first blue-option separator.

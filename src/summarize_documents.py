@@ -1146,7 +1146,7 @@ def _append_pdf_item_line(current: str, line: str, extra: bool, blue: bool = Fal
             if " | " in current:
                 return _join_pdf_item_text(current, line, join_without_space)
         return " | ".join(part for part in (current, line) if part)
-    return _join_pdf_item_text(current, line, join_without_space)
+    return _join_pdf_item_text(current, line, join_without_space=True)
 
 
 def _pdf_is_extra_price_line(name: str) -> bool:
