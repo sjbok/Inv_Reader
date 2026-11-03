@@ -43,6 +43,7 @@ from src.summarize_documents import (
     _parse_order_date,
     _item_text,
     _icecreammall_phone,
+    _icecreammall_items,
     _pdf_items,
     _pdf_line_value,
     _pdf_recipient_phone,
@@ -865,6 +866,33 @@ class SummarizerTests(unittest.TestCase):
             "마약예방 판박이 스티커 (타투스티커) 약물 오남용 예방 교육용 B 세트(8종)-2개",
             "마약예방 스마트폰 스트랩 만들기(1인) 약물 오남용 예방 교육용 단일상품-19개",
         ])
+
+    def test_icecreammall_pdf_item_text_excludes_website_links_outside_product_cells(self):
+        words = [
+            (100, 10, 130, 20, "상품명", 0, 0, 0),
+            (200, 10, 230, 20, "단품명", 0, 0, 1),
+            (300, 10, 350, 20, "추가입력옵션", 0, 0, 2),
+            (400, 10, 420, 20, "수량", 0, 0, 3),
+            (450, 10, 480, 20, "판매가", 0, 0, 4),
+            (100, 30, 160, 40, "티슈", 1, 0, 0),
+            (200, 30, 225, 40, "1개", 1, 0, 1),
+            (400, 30, 410, 40, "5", 1, 0, 2),
+            (200, 45, 320, 55, "https://inside.example/order", 2, 0, 0),
+            (100, 70, 320, 80, "https://footer.example/order", 3, 0, 0),
+        ]
+
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                return words
+
+            def get_drawings(self):
+                return [{"rect": types.SimpleNamespace(
+                    x0=40, y0=8, x1=500, y1=60,
+                )}]
+
+        items = _icecreammall_items(FakePage())
+
+        self.assertEqual([(item.name, item.quantity) for item in items], [("티슈 1개", "5")])
 
     def test_icecreammall_phone_prefers_mobile_and_falls_back_to_phone(self):
         class FakePage:

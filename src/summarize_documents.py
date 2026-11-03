@@ -950,6 +950,7 @@ def _icecreammall_items(page: Any) -> List[Item]:
         return []
 
     header_y = max(word[3] for word in headers.values())
+    table_bottom = _icecreammall_table_bottom(page, headers, header_y)
     product_center = (headers["상품명"][0] + headers["상품명"][2]) / 2
     single_center = (headers["단품명"][0] + headers["단품명"][2]) / 2
     option_center = ((headers["추가입력옵션"][0] + headers["추가입력옵션"][2]) / 2
@@ -979,7 +980,9 @@ def _icecreammall_items(page: Any) -> List[Item]:
         center_y = quantity_centers[index]
         lower = header_y if index == 0 else (quantity_centers[index - 1] + center_y) / 2
         upper = (center_y + quantity_centers[index + 1]) / 2 \
-            if index + 1 < len(quantity_centers) else float("inf")
+            if index + 1 < len(quantity_centers) else (
+                table_bottom if table_bottom is not None else float("inf")
+            )
         main_words = []
         single_words = []
         for word in words:
@@ -994,7 +997,8 @@ def _icecreammall_items(page: Any) -> List[Item]:
 
         def column_text(column_words: List[tuple]) -> str:
             return " ".join(word[4] for word in sorted(
-                column_words, key=lambda word: (word[1], word[0])
+                (word for word in column_words if not _is_pdf_url_word(word[4])),
+                key=lambda word: (word[1], word[0])
             )).strip()
 
         main_name = column_text(main_words)
@@ -1002,6 +1006,32 @@ def _icecreammall_items(page: Any) -> List[Item]:
         name = " ".join(part for part in (main_name, single_name) if part)
         items.append(Item(name=name, quantity=quantity_word[4].replace(",", ""), unit="개"))
     return [item for item in items if item.name or item.quantity]
+
+
+def _icecreammall_table_bottom(page: Any, headers: Dict[str, tuple],
+                               header_y: float) -> Optional[float]:
+    """Find the bottom of the shipment product table from its enclosing border."""
+    try:
+        drawings = page.get_drawings()
+    except (AttributeError, TypeError):
+        return None
+    left = headers["상품명"][0]
+    right = headers.get("판매가", headers["수량"])[2]
+    bottoms = []
+    for drawing in drawings:
+        rect = drawing.get("rect")
+        if rect is None:
+            continue
+        if (rect.x0 <= left and rect.x1 >= right
+                and rect.y0 <= header_y and rect.y1 > header_y):
+            bottoms.append(rect.y1)
+    return min(bottoms) if bottoms else None
+
+
+def _is_pdf_url_word(value: str) -> bool:
+    return bool(re.match(
+        r"(?i)^(?:https?://|www\.|(?:[a-z0-9-]+\.)+[a-z]{2,}/)", value.strip()
+    ))
 
 
 def _is_icecreammall_pdf(page: Any) -> bool:
