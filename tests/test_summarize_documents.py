@@ -147,6 +147,68 @@ class SummarizerTests(unittest.TestCase):
             workbook.close()
             self.assertEqual(client.prompts, [])
 
+    def test_icecreammall_export_imports_each_row_with_mapped_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            source = input_dir / "icecreammall.xlsx"
+
+            workbook = Workbook()
+            worksheet = workbook.active
+            headers = {
+                4: "사이트",
+                5: "주문완료일시",
+                16: "상품명",
+                17: "단품명",
+                18: "출고수량",
+                33: "수취인",
+                34: "수취인휴대폰번호",
+                36: "배송지",
+                37: "배송요청사항",
+            }
+            for column, value in headers.items():
+                worksheet.cell(1, column, value)
+
+            rows = [
+                {
+                    4: "아이스크림몰", 5: "2026-11-03 13:55:18",
+                    16: "양치컵·칫솔·모래시계 세트", 17: "단일상품", 18: 1,
+                    33: "박찬정", 34: "01041599981", 36: "인천광역시 계양구 봉오대로 457",
+                    37: "-",
+                },
+                {
+                    4: "아이스크림몰", 5: "2026-11-03 13:56:18",
+                    16: "균이제로 살균티슈", 17: "1개", 18: 5,
+                    33: "홍길동", 34: "02-333-4444", 36: "서울시 테스트로 2",
+                    37: "문 앞에 놓아주세요",
+                },
+            ]
+            for row_number, values in enumerate(rows, 2):
+                for column, value in values.items():
+                    worksheet.cell(row_number, column, value)
+            workbook.save(source)
+            workbook.close()
+
+            self.assertEqual(process_documents(input_dir, output_dir), 0)
+
+            workbook = load_workbook(output_dir / OUTPUT_WORKBOOK_NAME, data_only=True)
+            self.assertEqual(list(workbook["Orders"].values), [
+                DATABASE_HEADERS,
+                (
+                    "박찬정님", "010-4159-9981", None, "인천광역시 계양구 봉오대로 457", 1,
+                    "양치컵·칫솔·모래시계 세트 단일상품-1개", "a", "신용",
+                    "빠른배송바랍니다", "아이스크림몰", None,
+                ),
+                (
+                    "홍길동님", "02-333-4444", None, "서울시 테스트로 2", 1,
+                    "균이제로 살균티슈 1개-5개", "a", "신용", "빠른배송바랍니다",
+                    "아이스크림몰", "문 앞에 놓아주세요",
+                ),
+            ])
+            workbook.close()
+
     def test_existing_database_is_reused_when_processing_another_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -674,6 +674,50 @@ def _item_columns(rows: List[tuple]) -> Optional[Dict[str, int]]:
     return None
 
 
+def _extract_icecreammall_xlsx_orders(rows: List[tuple]) -> Optional[List[tuple]]:
+    """Extract one order per row from the 아이스크림몰 shipment export layout."""
+    columns = {
+        "company": (3, "사이트"),
+        "order_date": (4, "주문완료일시"),
+        "name": (15, "상품명"),
+        "option": (16, "단품명"),
+        "quantity": (17, "출고수량"),
+        "recipient": (32, "수취인"),
+        "phone": (33, "수취인휴대폰번호"),
+        "address": (35, "배송지"),
+        "memo": (36, "배송요청사항"),
+    }
+    header_row = next((index for index, row in enumerate(rows)
+                       if all(column < len(row)
+                              and _normalise_label(row[column]) == _normalise_label(label)
+                              for column, label in columns.values())), None)
+    if header_row is None:
+        return None
+
+    orders = []
+    for row_number, row in enumerate(rows[header_row + 1:], header_row + 2):
+        values = {
+            field: _cell_text(row[column]) if column < len(row) else ""
+            for field, (column, _) in columns.items()
+        }
+        item_name = " ".join(part for part in (values["name"], values["option"]) if part)
+        if not any((values["recipient"], values["phone"], values["address"],
+                    item_name, values["quantity"])):
+            continue
+        memo = "" if values["memo"] == "-" else values["memo"]
+        orders.append((row_number, PurchaseOrder(
+            order_date=_parse_order_date(row[columns["order_date"][0]]),
+            recipient=values["recipient"],
+            phone=values["phone"],
+            address=values["address"],
+            company=values["company"] or ICECREAMMALL_COMPANY,
+            memo=memo,
+            remarks=memo,
+            items=[Item(name=item_name, quantity=values["quantity"], unit="개")],
+        )))
+    return orders
+
+
 def _extract_order_from_rows(rows: List[tuple]) -> PurchaseOrder:
     columns = _item_columns(rows)
     items = []
@@ -1304,11 +1348,8 @@ def extract_pdf_order(path: Path, keys_path: Optional[Path] = None) -> PurchaseO
     return orders[0] if orders else PurchaseOrder(items=[])
 
 
-def extract_purchase_order(path: Path) -> PurchaseOrder:
-    """Extract the structured order fields from an XLSX workbook or order PDF."""
-    if path.suffix.lower() == ".pdf":
-        return extract_pdf_order(path)
-
+def _extract_xlsx_orders(path: Path) -> List[tuple]:
+    """Return orders from an XLSX, retaining row identities for row-based exports."""
     try:
         from openpyxl import load_workbook
     except ImportError as error:
@@ -1318,15 +1359,28 @@ def extract_purchase_order(path: Path) -> PurchaseOrder:
     try:
         for worksheet in workbook.worksheets:
             rows = list(worksheet.iter_rows())
+            marketplace_orders = _extract_icecreammall_xlsx_orders(rows)
+            if marketplace_orders is not None:
+                return [
+                    (order, "icecreammall_xlsx", row_number)
+                    for row_number, order in marketplace_orders
+                ] or [(PurchaseOrder(items=[]), "icecreammall_xlsx", 0)]
             order = _extract_order_from_rows(rows)
             if any((order.order_date, order.recipient, order.phone, order.address,
                     order.company, order.manager, order.email,
                     order.business_registration_number, order.business_address,
                     order.contact, order.memo, order.remarks, order.items)):
-                return order
+                return [(order, "xlsx", None)]
     finally:
         workbook.close()
-    return PurchaseOrder(items=[])
+    return [(PurchaseOrder(items=[]), "xlsx", None)]
+
+
+def extract_purchase_order(path: Path) -> PurchaseOrder:
+    """Extract the first structured order from an XLSX workbook or order PDF."""
+    if path.suffix.lower() == ".pdf":
+        return extract_pdf_order(path)
+    return _extract_xlsx_orders(path)[0][0]
 
 
 def confidence_level(order: PurchaseOrder) -> float:
@@ -1375,7 +1429,14 @@ def missing_required_fields(order: PurchaseOrder, source_format: str = "xlsx") -
         recipient_digits = order.recipient.replace("-", "")
         phone_digits = order.phone.replace("-", "")
         recipient_is_phone = recipient_digits.isdigit() and recipient_digits == phone_digits
-    if source_format == "pdf":
+    if source_format == "icecreammall_xlsx":
+        required_fields = (
+            ("사이트", order.company),
+            ("수취인", "" if recipient_is_phone else order.recipient),
+            ("수취인휴대폰번호", order.phone),
+            ("배송지", order.address),
+        )
+    elif source_format == "pdf":
         # The marketplace PDF does not contain the business fields used by the
         # XLSX purchase-order form. Its order-specific required fields are the
         # fields that can be copied from the PDF into the shared database.
@@ -1807,17 +1868,29 @@ def _file_status_callback(callback: Optional[Callable[[FileProcessingStatus], No
 
 
 def _document_orders(path: Path, input_dir: Path) -> List[tuple]:
-    """Return orders with a unique processed-file identity for each PDF page."""
+    """Return orders with unique identities for each PDF page or export row."""
     if path.suffix.lower() == ".pdf":
         return [
             (
                 order,
                 "{}#page-{}".format(path.name, page_number),
                 "{}#page-{}".format(path.relative_to(input_dir), page_number),
+                "pdf",
             )
             for page_number, order in enumerate(extract_pdf_orders(path), 1)
         ]
-    return [(extract_purchase_order(path), path.name, str(path.relative_to(input_dir)))]
+    extracted = _extract_xlsx_orders(path)
+    document_orders = []
+    relative_path = str(path.relative_to(input_dir))
+    for order, source_format, row_number in extracted:
+        if source_format == "icecreammall_xlsx":
+            processed_name = "{}#row-{}".format(path.name, row_number)
+            source_name = "{}#row-{}".format(relative_path, row_number)
+        else:
+            processed_name = path.name
+            source_name = relative_path
+        document_orders.append((order, processed_name, source_name, source_format))
+    return document_orders
 
 
 def _is_numeric_only_recipient(value: str) -> bool:
@@ -1827,12 +1900,11 @@ def _is_numeric_only_recipient(value: str) -> bool:
 
 def _validate_order_for_import(path: Path, input_dir: Path, order: PurchaseOrder,
                                source_name: str, report: Optional[ProcessingReport],
-                               on_file_status: Optional[Callable[[FileProcessingStatus], None]]) -> tuple:
+                               on_file_status: Optional[Callable[[FileProcessingStatus], None]],
+                               source_format: str = "xlsx") -> tuple:
     """Apply shared validation rules to one XLSX order or one PDF page."""
     confidence = confidence_level(order)
-    missing_fields = missing_required_fields(
-        order, "pdf" if path.suffix.lower() == ".pdf" else "xlsx"
-    )
+    missing_fields = missing_required_fields(order, source_format)
     if missing_fields:
         if report is not None:
             report.missing_data.append(MissingData(source_name, missing_fields))
@@ -1916,13 +1988,16 @@ def process_documents(input_dir: Path, output_dir: Path, client: Optional[Ollama
                 print("ERROR: {}: {}".format(path, error), file=sys.stderr)
                 continue
             source_order_date = next(
-                (order.order_date for order, _, _ in document_orders if order.order_date),
+                (order.order_date for order, _, _, _ in document_orders if order.order_date),
                 None,
             )
-            for page_number, (order, processed_name, source_name) in enumerate(document_orders, 1):
+            for page_number, (order, processed_name, source_name, source_format) in enumerate(
+                document_orders, 1
+            ):
                 try:
                     confidence, valid, missing = _validate_order_for_import(
-                        path, input_dir, order, source_name, report, on_file_status
+                        path, input_dir, order, source_name, report, on_file_status,
+                        source_format,
                     )
                 except Exception as error:
                     failures += 1
