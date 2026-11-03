@@ -462,6 +462,17 @@ def _cell_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _is_single_item_option(value: Any) -> bool:
+    """Return whether a 단품명 only expresses the default one-item selection."""
+    text = re.sub(r"[\s,()\[\]{}]", "", _cell_text(value)).casefold()
+    if text in {"단일", "단일상품", "단일옵션", "1", "1개", "1개입", "1개짜리",
+                "1세트", "1ea", "1set", "one", "oneitem", "single", "singleitem"}:
+        return True
+    return bool(re.fullmatch(
+        r"1(?:개|개입|개짜리|세트|ea|set|unit|item)?(?:상품|옵션|단품)?", text
+    ))
+
+
 def _is_grey_italic_cell(value: Any) -> bool:
     """Return whether a cell uses the form's grey italic example style."""
     font = getattr(value, "font", None)
@@ -700,7 +711,8 @@ def _extract_icecreammall_xlsx_orders(rows: List[tuple]) -> Optional[List[tuple]
             field: _cell_text(row[column]) if column < len(row) else ""
             for field, (column, _) in columns.items()
         }
-        item_name = " ".join(part for part in (values["name"], values["option"]) if part)
+        option_name = "" if _is_single_item_option(values["option"]) else values["option"]
+        item_name = " ".join(part for part in (values["name"], option_name) if part)
         if not any((values["recipient"], values["phone"], values["address"],
                     item_name, values["quantity"])):
             continue
@@ -1003,6 +1015,8 @@ def _icecreammall_items(page: Any) -> List[Item]:
 
         main_name = column_text(main_words)
         single_name = column_text(single_words)
+        if _is_single_item_option(single_name):
+            single_name = ""
         name = " ".join(part for part in (main_name, single_name) if part)
         items.append(Item(name=name, quantity=quantity_word[4].replace(",", ""), unit="개"))
     return [item for item in items if item.name or item.quantity]

@@ -44,6 +44,7 @@ from src.summarize_documents import (
     _item_text,
     _icecreammall_phone,
     _icecreammall_items,
+    _is_single_item_option,
     _pdf_items,
     _pdf_line_value,
     _pdf_recipient_phone,
@@ -199,12 +200,12 @@ class SummarizerTests(unittest.TestCase):
                 DATABASE_HEADERS,
                 (
                     "박찬정님", "010-4159-9981", None, "인천광역시 계양구 봉오대로 457", 1,
-                    "양치컵·칫솔·모래시계 세트 단일상품-1개", "a", "신용",
+                    "양치컵·칫솔·모래시계 세트-1개", "a", "신용",
                     "빠른배송바랍니다", "아이스크림몰", None,
                 ),
                 (
                     "홍길동님", "02-333-4444", None, "서울시 테스트로 2", 1,
-                    "균이제로 살균티슈 1개-5개", "a", "신용", "빠른배송바랍니다",
+                    "균이제로 살균티슈-5개", "a", "신용", "빠른배송바랍니다",
                     "아이스크림몰", "문 앞에 놓아주세요",
                 ),
             ])
@@ -892,7 +893,16 @@ class SummarizerTests(unittest.TestCase):
 
         items = _icecreammall_items(FakePage())
 
-        self.assertEqual([(item.name, item.quantity) for item in items], [("티슈 1개", "5")])
+        self.assertEqual([(item.name, item.quantity) for item in items], [("티슈", "5")])
+
+    def test_single_item_option_values_are_recognized(self):
+        for value in ("단일상품", "단일 옵션", "1", "1개", "1 개", "1개입", "1세트"):
+            with self.subTest(value=value):
+                self.assertTrue(_is_single_item_option(value))
+
+        for value in ("빨강 1개 one size", "2개", "선택 옵션"):
+            with self.subTest(value=value):
+                self.assertFalse(_is_single_item_option(value))
 
     def test_icecreammall_phone_prefers_mobile_and_falls_back_to_phone(self):
         class FakePage:
