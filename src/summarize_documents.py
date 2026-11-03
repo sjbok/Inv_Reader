@@ -992,14 +992,31 @@ def _extract_icecreammall_order_page(page: Any) -> PurchaseOrder:
     )
 
 
-def _join_pdf_item_text(left: str, right: str) -> str:
+def _join_pdf_item_text(left: str, right: str, join_without_space: bool = False) -> str:
     if not left:
         return right
     if not right:
         return left
-    if re.search(r"[가-힣]$", left) and re.match(r"[가-힣]", right):
-        return left + right
-    return left + " " + right
+    separator = "" if join_without_space or right[:1] in ",.:;!?%)]}-" else " "
+    return "{}{}{}".format(left.rstrip(), separator, right.lstrip())
+
+
+def _pdf_wrapped_word_continues(left: str, right: str, previous_line_at_edge: bool) -> bool:
+    """Join fragments only when a hard column wrap appears to split a word."""
+    if not previous_line_at_edge:
+        return False
+    previous_line = left.rsplit(" | ", 1)[-1].rstrip()
+    if previous_line.endswith((")", "]", "}", ",", ".")):
+        return False
+    previous_korean = re.search(r"[가-힣]+$", previous_line)
+    next_korean = re.match(r"[가-힣]+", right.lstrip())
+    return bool(
+        (previous_korean and len(previous_korean.group()) == 1)
+        or (next_korean and len(next_korean.group()) == 1)
+        or (previous_korean and next_korean
+            and len(previous_korean.group()) <= 2 and len(next_korean.group()) <= 2)
+        or (re.search(r"\d$", previous_line) and next_korean)
+    )
 
 
 def _pdf_is_blue_color(color: Any) -> bool:
@@ -1017,6 +1034,8 @@ def _pdf_line_is_blue(page: Any, line_words: List[tuple]) -> bool:
         return False
     line_top = min(word[1] for word in line_words)
     line_bottom = max(word[3] for word in line_words)
+    line_left = min(word[0] for word in line_words)
+    line_right = max(word[2] for word in line_words)
     try:
         blocks = page.get_text("dict", sort=True)["blocks"]
     except (KeyError, TypeError):
@@ -1025,19 +1044,21 @@ def _pdf_line_is_blue(page: Any, line_words: List[tuple]) -> bool:
         for line in block.get("lines", []):
             for span in line.get("spans", []):
                 span_bbox = span.get("bbox", (0, 0, 0, 0))
-                if span_bbox[1] <= line_bottom and span_bbox[3] >= line_top:
+                if (span_bbox[0] <= line_right and span_bbox[2] >= line_left
+                        and span_bbox[1] <= line_bottom and span_bbox[3] >= line_top):
                     if _pdf_is_blue_color(span.get("color")):
                         return True
     return False
 
 
-def _append_pdf_item_line(current: str, line: str, extra: bool, blue: bool = False) -> str:
+def _append_pdf_item_line(current: str, line: str, extra: bool, blue: bool = False,
+                          join_without_space: bool = False) -> str:
     if extra:
         if blue and ":" not in line and "：" not in line:
             if " | " in current:
-                return current + line
+                return _join_pdf_item_text(current, line, join_without_space)
         return " | ".join(part for part in (current, line) if part)
-    return _join_pdf_item_text(current, line)
+    return _join_pdf_item_text(current, line, join_without_space)
 
 
 def _pdf_is_extra_price_line(name: str) -> bool:
@@ -1171,11 +1192,11 @@ def _pdf_items(page: Any) -> List[Item]:
         else:
             lines[-1][1].append(word)
 
-    name_xs = [word[0] for word in table_words if word[0] < quantity_x - 3]
-    main_name_x = min(name_xs) if name_xs else quantity_x
     items = []
     pending_name = ""
+    pending_name_ends_at_wrap = False
     current = None
+    current_name_ends_at_wrap = False
     for _, line_words in lines:
         line_words.sort(key=lambda word: word[0])
         quantity = next((word[4].replace(",", "") for word in line_words
@@ -1183,45 +1204,48 @@ def _pdf_items(page: Any) -> List[Item]:
                          and re.fullmatch(r"\d+", word[4].replace(",", ""))), "")
         name_words = [word for word in line_words if word[0] < quantity_x - 3]
         name = " ".join(word[4] for word in name_words).strip()
+        line_ends_at_wrap = bool(name_words) and max(word[2] for word in name_words) >= quantity_x - 20
         if name == "계":
             continue
         blue = _pdf_line_is_blue(page, line_words)
-        extra = bool(name_words) and (
-            min(word[0] for word in name_words) > main_name_x + 4
-            or blue
-        )
+        # Product descriptions are black regardless of indentation; only blue
+        # text represents options that should be separated from the product.
+        extra = bool(name_words) and blue
         if extra and _pdf_is_extra_price_line(name):
             continue
         if quantity:
             if current is not None:
                 items.append(Item(**current))
-            item_name = (_append_pdf_item_line(pending_name, name, extra, blue)
+            item_name = (_append_pdf_item_line(
+                pending_name, name, extra, blue,
+                _pdf_wrapped_word_continues(
+                    pending_name, name, pending_name_ends_at_wrap
+                ),
+            )
                          if name else pending_name)
             current = {"name": item_name,
                        "quantity": quantity, "code": "", "unit": "개",
                        "quantity_before_options": True}
+            current_name_ends_at_wrap = line_ends_at_wrap if name else pending_name_ends_at_wrap
             pending_name = ""
+            pending_name_ends_at_wrap = False
         elif name:
             if current is None:
-                pending_name = _append_pdf_item_line(pending_name, name, extra, blue)
-            elif not extra:
-                # Some marketplace exports place each quantity on a separate
-                # line immediately after its product name. A non-indented,
-                # non-blue name after an item has been started is therefore a
-                # new item, not a continuation of the previous one.
-                if current["name"]:
-                    items.append(Item(**current))
-                    current = None
-                    pending_name = _append_pdf_item_line("", name, extra, blue)
-                else:
-                    current["name"] = _append_pdf_item_line(
-                        pending_name, name, extra, blue
-                    )
-                    pending_name = ""
+                pending_name = _append_pdf_item_line(
+                    pending_name, name, extra, blue,
+                    _pdf_wrapped_word_continues(
+                        pending_name, name, pending_name_ends_at_wrap
+                    ),
+                )
+                pending_name_ends_at_wrap = line_ends_at_wrap
             else:
                 current["name"] = _append_pdf_item_line(
-                    current["name"], name, extra, blue
+                    current["name"], name, extra, blue,
+                    _pdf_wrapped_word_continues(
+                        current["name"], name, current_name_ends_at_wrap
+                    ),
                 )
+                current_name_ends_at_wrap = line_ends_at_wrap
     if current is not None:
         items.append(Item(**current))
     return [item for item in items if item.name or item.quantity]

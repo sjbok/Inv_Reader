@@ -922,6 +922,45 @@ class SummarizerTests(unittest.TestCase):
             "주상품-2개 | 옵션: 빨강-추가 | 포장: 선물용",
         )
 
+    def test_pdf_items_join_black_lines_and_group_wrapped_blue_options(self):
+        words = [
+            (98, 10, 130, 20, "상품/옵션", 0, 0, 0),
+            (214, 10, 230, 20, "수량", 0, 0, 1),
+            (258, 10, 290, 20, "판매가", 0, 0, 2),
+            (235, 30, 240, 40, "2", 1, 0, 0),
+            (30, 42, 70, 52, "검은색상품", 1, 1, 0),
+            (45, 54, 100, 64, "추가 설명", 1, 2, 0),
+            (45, 66, 200, 76, "안전교", 1, 3, 0),
+            (45, 78, 100, 88, "육 자료", 1, 4, 0),
+            (45, 90, 95, 100, "옵션: 빨강", 2, 0, 0),
+            (45, 102, 100, 112, "한 사이즈", 2, 1, 0),
+            (45, 114, 100, 124, "포장: 선물용", 2, 2, 0),
+            (111, 132, 125, 142, "계", 3, 0, 0),
+        ]
+        spans = [
+            {"bbox": (45, 90, 95, 100), "color": 255},
+            {"bbox": (45, 102, 100, 112), "color": 255},
+            {"bbox": (45, 114, 100, 124), "color": 255},
+        ]
+
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                if kind == "words":
+                    return words
+                return {"blocks": [{"lines": [{"spans": spans}]}]}
+
+        items = _pdf_items(FakePage())
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            items[0].name,
+            "검은색상품 추가 설명 안전교육 자료 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
+        )
+        self.assertEqual(
+            _item_text(items[0]),
+            "검은색상품 추가 설명 안전교육 자료-2개 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
+        )
+
     def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
