@@ -32,7 +32,6 @@ from src.summarize_documents import (
     confidence_level,
     extract_purchase_order,
     extract_pdf_order,
-    format_phone_number,
     iter_documents,
     main,
     output_name,
@@ -44,6 +43,7 @@ from src.summarize_documents import (
     _item_text,
     _icecreammall_phone,
     _icecreammall_items,
+    _icecreammall_recipient,
     _is_single_item_option,
     _pdf_items,
     _pdf_line_value,
@@ -199,7 +199,7 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(list(workbook["Orders"].values), [
                 DATABASE_HEADERS,
                 (
-                    "박찬정님", "010-4159-9981", None, "인천광역시 계양구 봉오대로 457", 1,
+                    "박찬정님", "01041599981", None, "인천광역시 계양구 봉오대로 457", 1,
                     "양치컵·칫솔·모래시계 세트-1개", "a", "신용",
                     "빠른배송바랍니다", "아이스크림몰", None,
                 ),
@@ -326,39 +326,13 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(_parse_order_date("02/09/2026"), date(2026, 9, 2))
         self.assertEqual(_parse_order_date("12/31/26"), date(2026, 12, 31))
 
-    def test_phone_numbers_are_validated_and_formatted(self):
-        self.assertEqual(format_phone_number("01012345678"), "010-1234-5678")
-        self.assertEqual(format_phone_number("02-123-4567"), "02-123-4567")
-        self.assertEqual(format_phone_number("010-12345678"), "010-1234-5678")
-        self.assertEqual(format_phone_number("0101234-5678"), "010-1234-5678")
-        self.assertEqual(format_phone_number("021234567"), "02-123-4567")
-        self.assertEqual(format_phone_number("0212345678"), "02-1234-5678")
-        self.assertEqual(format_phone_number("02-123-4567").count("-"), 2)
-        self.assertEqual(format_phone_number("0212345678").count("-"), 2)
-        self.assertEqual(format_phone_number("01012345678").count("-"), 2)
-        self.assertEqual(format_phone_number("0312345678"), "031-234-5678")
-        self.assertEqual(format_phone_number("0512345678"), "051-234-5678")
-        self.assertEqual(format_phone_number("051234567890"), "0512-3456-7890")
-        self.assertEqual(format_phone_number("0612345678"), "061-234-5678")
-        self.assertEqual(format_phone_number("07123456789"), "071-2345-6789")
-        self.assertEqual(format_phone_number("0504-1234-567"), "0504-1234-567")
-        self.assertEqual(format_phone_number("0504-1234-5678"), "0504-1234-5678")
-        with self.assertRaisesRegex(ValueError, "0으로 시작"):
-            format_phone_number("1012345678")
-        with self.assertRaisesRegex(ValueError, "010 또는 02~07"):
-            format_phone_number("0812345678")
-        with self.assertRaisesRegex(ValueError, "형식"):
-            format_phone_number("0101234567")
-        with self.assertRaisesRegex(ValueError, "숫자와"):
-            format_phone_number("010-1234-5678x")
-
-    def test_unformatted_phone_is_saved_with_two_dashes(self):
+    def test_phone_with_any_digits_is_preserved_without_format_rules(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "input"
             output_dir = root / "output"
             input_dir.mkdir()
-            self._write_order(input_dir / "unformatted-phone.xlsx", phone="01012345678")
+            self._write_order(input_dir / "unformatted-phone.xlsx", phone="81-23x")
 
             self.assertEqual(process_documents(input_dir, output_dir), 0)
 
@@ -366,9 +340,24 @@ class SummarizerTests(unittest.TestCase):
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
             phone = workbook["Orders"].cell(2, 2).value
-            self.assertEqual(phone, "010-1234-5678")
-            self.assertEqual(phone.count("-"), 2)
+            self.assertEqual(phone, "81-23x")
             workbook.close()
+
+    def test_phone_without_digits_is_reported_as_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            self._write_order(input_dir / "missing-phone.xlsx", phone="call me")
+
+            report = ProcessingReport([], [])
+            self.assertEqual(process_documents(input_dir, output_dir, report=report), 1)
+
+            self.assertEqual(report.missing_data, [
+                MissingData("missing-phone.xlsx", ["수령인 연락처"]),
+            ])
+            self.assertEqual(report.invalid_data, [])
 
     def test_xlsx_text_normalizes_order_date_for_model_reading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -646,13 +635,13 @@ class SummarizerTests(unittest.TestCase):
             self.assertEqual(workbook["Orders"].cell(2, 6).value, "테스트 상품 [중형]-2개")
             workbook.close()
 
-    def test_invalid_phone_is_skipped_and_reported(self):
+    def test_phone_with_unusual_prefix_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "input"
             output_dir = root / "output"
             input_dir.mkdir()
-            self._write_order(input_dir / "invalid-phone.xlsx", phone="0812345678")
+            self._write_order(input_dir / "unusual-phone.xlsx", phone="08123")
 
             report = ProcessingReport([], [])
             statuses = []
@@ -661,16 +650,14 @@ class SummarizerTests(unittest.TestCase):
                 output_dir,
                 report=report,
                 on_file_status=statuses.append,
-            ), 1)
+            ), 0)
 
-            self.assertEqual(report.invalid_data, [
-                InvalidData("invalid-phone.xlsx", "전화", "전화번호 국번은 010 또는 02~07이어야 합니다"),
-            ])
-            self.assertEqual(statuses[-1].status, "failed")
+            self.assertEqual(report.invalid_data, [])
+            self.assertEqual(statuses[-1].status, "success")
             workbook = load_workbook(
                 output_dir / OUTPUT_WORKBOOK_NAME, data_only=True
             )
-            self.assertEqual(workbook["Orders"].max_row, 1)
+            self.assertEqual(workbook["Orders"].cell(2, 2).value, "08123")
             workbook.close()
 
     def test_numeric_only_recipient_is_skipped_and_reported(self):
@@ -918,14 +905,30 @@ class SummarizerTests(unittest.TestCase):
                 return self.words if kind == "words" else ""
 
         self.assertEqual(
-            _icecreammall_phone(FakePage("010-1111-2222", "02-333-4444")),
-            "010-1111-2222",
+            _icecreammall_phone(FakePage("12", "34")),
+            "12",
         )
         self.assertEqual(
-            _icecreammall_phone(FakePage("", "02-333-4444")),
-            "02-333-4444",
+            _icecreammall_phone(FakePage("", "34")),
+            "34",
         )
         self.assertEqual(_icecreammall_phone(FakePage("", "")), "")
+
+    def test_icecreammall_recipient_keeps_wrapped_value_lines(self):
+        words = [
+            (63, 333, 89, 345, "수취인", 16, 0, 0),
+            (111, 328, 201, 340, "아라초등학교병설유치", 16, 1, 0),
+            (111, 340, 148, 352, "원강윤정", 16, 2, 0),
+        ]
+
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                return words
+
+        self.assertEqual(
+            _icecreammall_recipient(FakePage()),
+            "아라초등학교병설유치원강윤정",
+        )
 
     def test_marketplace_pdf_keeps_names_when_quantity_is_on_next_line(self):
         path = Path("input/주문상세정보dfd.pdf")
@@ -966,18 +969,25 @@ class SummarizerTests(unittest.TestCase):
             "충청남도 천안시 (학교)",
         )
 
-    def test_pdf_phone_falls_back_to_mobile_when_general_phone_is_empty(self):
+    def test_pdf_phone_prefers_general_and_falls_back_to_mobile_when_empty(self):
         class FakePage:
+            def __init__(self, general="", mobile=""):
+                self.words = [
+                    (10, 100, 50, 110, "일반전화", 0, 0, 0),
+                    (70, 100, 110, 110, general, 0, 0, 1),
+                    (10, 120, 50, 130, "휴대전화", 0, 0, 2),
+                    (70, 120, 110, 130, mobile, 0, 0, 3),
+                ]
+
             def get_text(self, kind, sort=False):
                 if kind == "words":
-                    return [
-                        (10, 100, 50, 110, "일반전화", 0, 0, 0),
-                        (70, 100, 110, 110, "휴대전화", 0, 0, 1),
-                        (130, 100, 220, 110, "0504-1234-567", 0, 0, 2),
-                    ]
-                return "일반전화 휴대전화 0504-1234-567"
+                    return self.words
+                return "일반전화 {}\n휴대전화 {}".format(
+                    self.words[1][4], self.words[3][4]
+                )
 
-        self.assertEqual(_pdf_recipient_phone(FakePage()), "0504-1234-567")
+        self.assertEqual(_pdf_recipient_phone(FakePage("456", "123")), "456")
+        self.assertEqual(_pdf_recipient_phone(FakePage("", "123")), "123")
 
     def test_pdf_phone_is_empty_when_general_and_mobile_are_missing(self):
         class FakePage:
@@ -1059,6 +1069,29 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(
             _item_text(items[0]),
             "검은색상품추가 설명안전교육 자료-2개 | 옵션: 빨강 한 사이즈 | 포장: 선물용",
+        )
+
+    def test_pdf_items_group_name_and_quantity_with_small_baseline_offset(self):
+        words = [
+            (98, 10, 130, 20, "상품/옵션", 0, 0, 0),
+            (214, 10, 230, 20, "수량", 0, 0, 1),
+            (258, 10, 290, 20, "판매가", 0, 0, 2),
+            (30, 30, 90, 40, "첫상품", 1, 0, 0),
+            (235, 32.3, 240, 42.3, "2", 1, 1, 0),
+            (30, 72, 90, 82, "둘상품", 2, 0, 0),
+            (235, 74.3, 240, 84.3, "3", 2, 1, 0),
+            (111, 100, 125, 110, "계", 3, 0, 0),
+        ]
+
+        class FakePage:
+            def get_text(self, kind, sort=False):
+                return words
+
+        items = _pdf_items(FakePage())
+
+        self.assertEqual(
+            [(item.name, item.quantity) for item in items],
+            [("첫상품", "2"), ("둘상품", "3")],
         )
 
     def test_xlsx_and_marketplace_pdf_append_to_the_same_database(self):

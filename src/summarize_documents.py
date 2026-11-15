@@ -803,6 +803,11 @@ def _normalise_pdf_address(address: str) -> str:
     return re.sub(r"^\(\d+\)\s*", "", address)
 
 
+def _has_phone_number(value: Any) -> bool:
+    """Phone fields are present when they contain at least one digit."""
+    return bool(re.search(r"\d", str(value or "")))
+
+
 def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
                     multiline: bool = False, stop_labels: Optional[Sequence[str]] = None) -> str:
     """Read the value following a PDF label, including values wrapped to later lines."""
@@ -844,9 +849,9 @@ def _pdf_line_value(lines: List[str], label: str, occurrence: int = -1,
 
 
 def _pdf_phone_from_text(value: str) -> str:
-    for match in re.finditer(r"(?<!\d)0(?:[\d-]\s*){8,15}(?!\d)", value):
+    for match in re.finditer(r"(?<!\d)\d(?:[\d\s().+/-]*\d)?(?!\d)", value):
         phone = re.sub(r"\s+", "", match.group(0))
-        if 9 <= len(phone.replace("-", "")) <= 12:
+        if re.search(r"\d", phone):
             return phone
     return ""
 
@@ -889,19 +894,36 @@ def _pdf_words_with_label(page: Any, label: str) -> List[tuple]:
 def _icecreammall_recipient(page: Any) -> str:
     """Read the recipient from the left-hand 수취인 field."""
     words = page.get_text("words", sort=True)
-    labels = [word for word in words
-              if _normalise_label(word[4]) == _normalise_label("수취인")
-              and word[0] < 180]
+    recipient_label = _normalise_label("수취인")
+    all_labels = [word for word in words if _normalise_label(word[4]) == recipient_label]
+    labels = [word for word in all_labels if word[0] < 180]
     if not labels:
         return ""
     label = min(labels, key=lambda word: (word[1], word[0]))
-    same_line = [word for word in words
-                 if word[0] >= label[2] - 2
-                 and word[0] < 200
-                 and abs((word[1] + word[3]) / 2 - (label[1] + label[3]) / 2) < 4]
-    values = [word[4] for word in sorted(same_line, key=lambda word: word[0])
-              if _normalise_label(word[4]) != _normalise_label("수취인")]
-    return " ".join(values).strip()
+    label_center = (label[1] + label[3]) / 2
+    next_label_x = min(
+        (word[0] for word in all_labels if word[0] > label[2]),
+        default=230,
+    )
+    value_words = [word for word in words
+                   if word[0] >= label[2] - 2
+                   and word[0] < next_label_x - 2
+                   and abs((word[1] + word[3]) / 2 - label_center) < 30
+                   and word[5] == label[5]]
+    if not value_words:
+        # A few PDF generators split the value into a separate text block.
+        value_words = [word for word in words
+                       if word[0] >= label[2] - 2
+                       and word[0] < next_label_x - 2
+                       and abs((word[1] + word[3]) / 2 - label_center) < 30]
+    lines = []
+    for word in sorted(value_words, key=lambda candidate: (candidate[1], candidate[0])):
+        if not lines or abs(word[1] - lines[-1][0]) > 2:
+            lines.append([word[1], [word]])
+        else:
+            lines[-1][1].append(word)
+    return "".join(" ".join(word[4] for word in line_words)
+                   for _, line_words in lines).strip()
 
 
 def _icecreammall_phone(page: Any) -> str:
@@ -1275,7 +1297,9 @@ def _pdf_items(page: Any) -> List[Item]:
                    if word[1] > header[3] and word[3] < total_word[1] + 1]
     lines = []
     for word in table_words:
-        if not lines or abs(word[1] - lines[-1][0]) > 2:
+        # Some exports place the quantity baseline a little below the product
+        # baseline, even though both belong to the same logical table row.
+        if not lines or abs(word[1] - lines[-1][0]) > 3:
             lines.append([word[1], [word]])
         else:
             lines[-1][1].append(word)
@@ -1432,7 +1456,7 @@ def confidence_level(order: PurchaseOrder) -> float:
     checks = [
         order.order_date is not None,
         bool(order.recipient),
-        bool(order.phone),
+        _has_phone_number(order.phone),
         bool(order.address),
         bool(order.company),
         bool(order.items),
@@ -1451,7 +1475,7 @@ def confidence_reasons(order: PurchaseOrder) -> List[str]:
         reasons.append("발주일자")
     if not order.recipient:
         reasons.append("수령인")
-    if not order.phone:
+    if not _has_phone_number(order.phone):
         reasons.append("수령인 연락처")
     if not order.address:
         reasons.append("배송지 주소")
@@ -1468,16 +1492,17 @@ def confidence_reasons(order: PurchaseOrder) -> List[str]:
 def missing_required_fields(order: PurchaseOrder, source_format: str = "xlsx") -> List[str]:
     """Return the input columns that must be populated before import."""
     missing = []
+    phone = order.phone if _has_phone_number(order.phone) else ""
     recipient_is_phone = False
-    if order.recipient and order.phone:
+    if order.recipient and phone:
         recipient_digits = order.recipient.replace("-", "")
-        phone_digits = order.phone.replace("-", "")
+        phone_digits = phone.replace("-", "")
         recipient_is_phone = recipient_digits.isdigit() and recipient_digits == phone_digits
     if source_format == "icecreammall_xlsx":
         required_fields = (
             ("사이트", order.company),
             ("수취인", "" if recipient_is_phone else order.recipient),
-            ("수취인휴대폰번호", order.phone),
+            ("수취인휴대폰번호", phone),
             ("배송지", order.address),
         )
     elif source_format == "pdf":
@@ -1488,7 +1513,7 @@ def missing_required_fields(order: PurchaseOrder, source_format: str = "xlsx") -
             ("주문일자", order.order_date),
             ("업체명", order.company),
             ("수령자명", "" if recipient_is_phone else order.recipient),
-            ("휴대전화", order.phone),
+            ("휴대전화", phone),
             ("배송지 주소", order.address),
         )
     else:
@@ -1501,7 +1526,7 @@ def missing_required_fields(order: PurchaseOrder, source_format: str = "xlsx") -
             ("사업자 주소", order.business_address),
             ("연락처", order.contact),
             ("수령인", "" if recipient_is_phone else order.recipient),
-            ("수령인 연락처", order.phone),
+            ("수령인 연락처", phone),
             ("배송지 주소", order.address),
         )
     missing.extend(label for label, value in required_fields if not value)
@@ -1541,41 +1566,6 @@ def _display_recipient(value: Any) -> Any:
     if not value:
         return None
     return value if value.endswith("님") else value + "님"
-
-
-def format_phone_number(phone: str) -> str:
-    """Validate and normalize a Korean phone number for the output workbook."""
-    value = phone.strip()
-    digits = value.replace("-", "")
-    if not digits.isdigit():
-        raise ValueError("전화번호에는 숫자와 '-'만 사용할 수 있습니다")
-    if not digits.startswith("0"):
-        raise ValueError("전화번호는 0으로 시작해야 합니다")
-
-    formats = {
-        "010": {11: (3, 4, 4)},
-        "02": {9: (2, 3, 4), 10: (2, 4, 4)},
-        "03": {10: (3, 3, 4)},
-        "04": {10: (3, 3, 4)},
-        "050": {11: (4, 4, 3), 12: (4, 4, 4)},
-        "05": {10: (3, 3, 4), 12: (4, 4, 4)},
-        "06": {10: (3, 3, 4)},
-        "07": {11: (3, 4, 4)},
-    }
-    prefix = next((candidate for candidate in formats if digits.startswith(candidate)), None)
-    if prefix is None:
-        raise ValueError("전화번호 국번은 010 또는 02~07이어야 합니다")
-    if not 9 <= len(digits) <= 12:
-        raise ValueError("하이픈을 제외한 전화번호 길이는 9~12자리여야 합니다")
-    groups = formats[prefix].get(len(digits))
-    if groups is None:
-        raise ValueError("전화번호 형식에 맞지 않는 자리수입니다")
-    parts = []
-    position = 0
-    for length in groups:
-        parts.append(digits[position:position + length])
-        position += length
-    return "-".join(parts)
 
 
 def _database_row(order: PurchaseOrder, item: Item) -> List[Any]:
@@ -1687,12 +1677,6 @@ def _prepare_database_sheet_schema(worksheet: Any) -> Any:
 
     for row in range(2, worksheet.max_row + 1):
         worksheet.cell(row, 1).value = _display_recipient(worksheet.cell(row, 1).value)
-        phone_cell = worksheet.cell(row, 2)
-        if phone_cell.value:
-            try:
-                phone_cell.value = format_phone_number(str(phone_cell.value))
-            except ValueError:
-                pass
 
     widths = (18, 18, 12, 45, 10, 45, 12, 12, 24, 28, 30)
     for column, width in enumerate(widths, 1):
@@ -1970,14 +1954,6 @@ def _validate_order_for_import(path: Path, input_dir: Path, order: PurchaseOrder
             report.invalid_data.append(InvalidData(source_name, "수령인", reason))
         _file_status_callback(on_file_status, path, input_dir, "failed", confidence, reason)
         print("ERROR: {}: invalid 수령인: {}".format(source_name, reason), file=sys.stderr)
-        return confidence, False, False
-    try:
-        order.phone = format_phone_number(order.phone)
-    except ValueError as error:
-        if report is not None:
-            report.invalid_data.append(InvalidData(source_name, "전화", str(error)))
-        _file_status_callback(on_file_status, path, input_dir, "failed", confidence, str(error))
-        print("ERROR: {}: invalid 전화: {}".format(source_name, error), file=sys.stderr)
         return confidence, False, False
     _file_status_callback(
         on_file_status,
