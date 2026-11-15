@@ -1,9 +1,18 @@
 param(
     [string]$Model = "qwen3-vl:8b",
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [string]$ActivationServer,
+    [string]$ActivationPublicKey
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ActivationServer)) {
+    throw "ActivationServer is required. Use the HTTPS URL of your activation server."
+}
+if ([string]::IsNullOrWhiteSpace($ActivationPublicKey)) {
+    throw "ActivationPublicKey is required. Get it from /v1/public-key on your activation server."
+}
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
@@ -67,15 +76,27 @@ if (Test-Path $bundle) {
 }
 
 Write-Host "Building Inv_Reader.exe..."
-& $Python -m PyInstaller --noconfirm --clean --onedir --windowed `
-    --name Inv_Reader `
-    --hidden-import fitz `
-    --hidden-import pypdf `
-    --hidden-import docx `
-    --hidden-import openpyxl `
-    src\summarize_documents.py
-if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller failed."
+$activationModule = Join-Path $projectRoot "src\activation_build_config.py"
+$activationServerLiteral = $ActivationServer.TrimEnd('/').Replace("'", "''")
+$activationPublicKeyLiteral = $ActivationPublicKey.Trim().Replace("'", "''")
+@"
+ACTIVATION_SERVER = '$activationServerLiteral'
+ACTIVATION_PUBLIC_KEY = '$activationPublicKeyLiteral'
+"@ | Set-Content $activationModule -Encoding UTF8
+try {
+    & $Python -m PyInstaller --noconfirm --clean --onedir --windowed `
+        --name Inv_Reader `
+        --hidden-import fitz `
+        --hidden-import pypdf `
+        --hidden-import docx `
+        --hidden-import openpyxl `
+        --hidden-import src.activation_build_config `
+        src\summarize_documents.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller failed."
+    }
+} finally {
+    Remove-Item $activationModule -Force -ErrorAction SilentlyContinue
 }
 
 $ollamaDirectory = Join-Path $bundle "ollama"
@@ -85,7 +106,13 @@ New-Item $bundleModels -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $ollamaInstall "*") $ollamaDirectory -Recurse -Force
 Copy-Item (Join-Path $modelsSource "*") $bundleModels -Recurse -Force
 Copy-Item (Join-Path $projectRoot "Keys.pdf") $bundle -Force
-@{ model = $Model } | ConvertTo-Json | Set-Content (Join-Path $bundle "portable_config.json") -Encoding UTF8
+@{
+    model = $Model
+    activation_required = $true
+    activation_server = $ActivationServer.TrimEnd('/')
+    activation_public_key = $ActivationPublicKey.Trim()
+    product = "Inv_Reader"
+} | ConvertTo-Json | Set-Content (Join-Path $bundle "portable_config.json") -Encoding UTF8
 New-Item (Join-Path $bundle "input") -ItemType Directory -Force | Out-Null
 New-Item (Join-Path $bundle "output") -ItemType Directory -Force | Out-Null
 

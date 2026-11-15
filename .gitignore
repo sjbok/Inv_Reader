@@ -220,3 +220,7 @@ __marimo__/
 # Generated document summaries
 output/*.txt
 output/*.xlsx
+
+# Local activation-server database and signing key
+activation_server_data/
+src/activation_build_config.py

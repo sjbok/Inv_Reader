@@ -22,6 +22,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
+from src.licensing import (
+    ActivationClient,
+    ActivationError,
+    ActivationSettings,
+    compiled_activation_settings,
+    default_license_directory,
+)
+
 
 DEFAULT_MODEL = "qwen3-vl:8b"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
@@ -246,13 +254,19 @@ def _runtime_path(path: Path, root: Path) -> Path:
 
 def configured_model(root: Path) -> str:
     """Read the model selected by the Windows build, if one was configured."""
+    config = portable_configuration(root)
+    model = config.get("model") if isinstance(config, dict) else None
+    return model if isinstance(model, str) and model.strip() else DEFAULT_MODEL
+
+
+def portable_configuration(root: Path) -> Dict[str, Any]:
+    """Read the packaged runtime configuration, if present."""
     config_path = root / PORTABLE_CONFIG_NAME
     try:
         config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
-        return DEFAULT_MODEL
-    model = config.get("model") if isinstance(config, dict) else None
-    return model if isinstance(model, str) and model.strip() else DEFAULT_MODEL
+        return {}
+    return config if isinstance(config, dict) else {}
 
 
 class OllamaRuntime:
@@ -2371,9 +2385,136 @@ class ProcessingWindow:
         return self._failures, self._error
 
 
+def _activation_settings(config: Dict[str, Any]) -> ActivationSettings:
+    """Build activation settings from the packaged configuration."""
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        # The external JSON file is convenient for model configuration but must
+        # not be able to turn licensing off or replace the trusted public key.
+        return compiled_activation_settings()
+    return ActivationSettings(
+        str(config.get("activation_server", "")),
+        str(config.get("activation_public_key", "")),
+        bool(config.get("activation_required", False)),
+    )
+
+
+def _activation_code_prompt(machine_public_key: str) -> str:
+    """Ask the user for the one-time code without requiring a console in the EXE."""
+    if is_windowed_application():
+        import tkinter as tk
+        from tkinter import ttk
+
+        dialog_root = tk.Tk()
+        dialog_root.title("Inv_Reader activation")
+        dialog_root.resizable(False, False)
+        dialog_root.protocol("WM_DELETE_WINDOW", dialog_root.destroy)
+
+        frame = ttk.Frame(dialog_root, padding=18)
+        frame.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(
+            frame,
+            text="This computer needs a one-time activation code.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(
+            frame,
+            text="Send this machine key to the Inv_Reader owner:",
+        ).grid(row=1, column=0, columnspan=2, sticky="w")
+
+        machine_key = tk.StringVar(value=machine_public_key)
+        machine_key_entry = ttk.Entry(
+            frame, textvariable=machine_key, width=70, state="readonly"
+        )
+        machine_key_entry.grid(row=2, column=0, padx=(0, 8), pady=(5, 14), sticky="ew")
+        copy_status = tk.StringVar(value="")
+
+        def copy_machine_key() -> None:
+            try:
+                dialog_root.clipboard_clear()
+                dialog_root.clipboard_append(machine_public_key)
+                dialog_root.update()
+                copy_status.set("Copied")
+            except tk.TclError:
+                copy_status.set("Copy failed; select the key and copy it manually")
+
+        ttk.Button(frame, text="Copy machine key", command=copy_machine_key).grid(
+            row=2, column=1, pady=(5, 14), sticky="ew"
+        )
+        ttk.Label(frame, textvariable=copy_status).grid(
+            row=3, column=0, columnspan=2, sticky="w"
+        )
+        ttk.Label(frame, text="Enter the activation code you received:").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(14, 0)
+        )
+        activation_code = tk.StringVar()
+        activation_entry = ttk.Entry(frame, textvariable=activation_code, width=70)
+        activation_entry.grid(row=5, column=0, columnspan=2, pady=(5, 14), sticky="ew")
+
+        result = {"code": ""}
+
+        def activate() -> None:
+            result["code"] = activation_code.get().strip()
+            dialog_root.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e")
+        ttk.Button(buttons, text="Cancel", command=dialog_root.destroy).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(buttons, text="Activate", command=activate).pack(side="right")
+        activation_entry.focus_set()
+        dialog_root.bind("<Return>", lambda event: activate())
+        dialog_root.mainloop()
+        return result["code"]
+    print("Send this machine key to the Inv_Reader owner first:")
+    print(machine_public_key)
+    return input("Enter the Inv_Reader activation code: ").strip()
+
+
+def ensure_application_activation(root: Path, config: Dict[str, Any]) -> None:
+    """Require a packaged build to activate once before it can process documents."""
+    settings = _activation_settings(config)
+    if not settings.required:
+        return
+    if not settings.server_url or not settings.public_key:
+        raise ActivationError(
+            "This build requires activation but its activation server configuration is incomplete."
+        )
+    client = ActivationClient(
+        settings.server_url,
+        settings.public_key,
+        default_license_directory(root),
+    )
+    machine_public_key = client.device_public_key()
+    try:
+        if client.load_valid_certificate() is not None:
+            return
+    except ActivationError:
+        # A replaced machine or damaged license can be activated again with a new code.
+        pass
+    code = _activation_code_prompt(machine_public_key)
+    if not code:
+        raise ActivationError("Activation was cancelled")
+    try:
+        client.activate(code)
+    except ActivationError as error:
+        if is_windowed_application():
+            import tkinter as tk
+            from tkinter import messagebox
+
+            dialog_root = tk.Tk()
+            dialog_root.withdraw()
+            try:
+                messagebox.showerror("Activation failed", str(error), parent=dialog_root)
+            finally:
+                dialog_root.destroy()
+        raise
+
+
 def _run_application(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     root = application_root()
+    runtime_config = portable_configuration(root)
+    ensure_application_activation(root, runtime_config)
     model = args.model or configured_model(root)
     input_dir = _runtime_path(args.input, root)
     output_dir = _runtime_path(args.output, root)

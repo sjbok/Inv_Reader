@@ -75,7 +75,9 @@ the application, or a separate Windows computer.
 
    ```powershell
    Set-ExecutionPolicy -Scope Process Bypass
-   .\build_windows.ps1
+   .\build_windows.ps1 `
+      -ActivationServer "https://YOUR-ACTIVATION-SERVER" `
+      -ActivationPublicKey "YOUR-ACTIVATION-PUBLIC-KEY"
    ```
 
    The script installs the Python dependencies, downloads `qwen3-vl:8b`, starts a
@@ -86,8 +88,13 @@ the application, or a separate Windows computer.
 8. To build with a different Ollama model, pass the model name to the script:
 
    ```powershell
-   .\build_windows.ps1 -Model "qwen3-vl:8b"
+   .\build_windows.ps1 -Model "qwen3-vl:8b" `
+     -ActivationServer "https://YOUR-ACTIVATION-SERVER" `
+     -ActivationPublicKey "YOUR-ACTIVATION-PUBLIC-KEY"
    ```
+
+The activation server URL and public key are written into the portable package.
+The private signing key must never be copied into the application package.
 
 ### 2. Check the Build Output
 
@@ -167,6 +174,12 @@ directly run on macOS or Linux. The target computer needs enough disk space and
 memory for the bundled `qwen3-vl:8b` model. CPU-only computers can run the model but
 may process documents more slowly. Keep the entire `Inv_Reader` folder together when
 moving or copying the application.
+
+Each approved Windows computer uses one one-time activation code. After
+activation, the application verifies its signed license locally and does not
+need internet access to process documents. Generate another code when the
+client purchases another machine slot. See `ACTIVATION_SETUP.md` for setup and
+administration instructions.
 
 For development or an existing Ollama server, the original command still works:
 
